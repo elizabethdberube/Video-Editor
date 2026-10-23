@@ -1,0 +1,44 @@
+# Video-Editor
+
+A local, free YouTube editing pipeline for the eggheadfixers channel (DIY
+repair tutorials and reviews). Everything runs on your own PC — no paid
+software, no cloud editing services.
+
+## How it works
+
+1. **Transcribe** your raw footage (Parakeet, a free speech-to-text model) to
+   get word-level timestamps.
+2. **Claude makes the editorial decisions** — what to cut, which B-roll to
+   use, where to punch in, what graphics to add — and writes them into a
+   `plan.json` file for that video.
+3. **Scripts carry out the plan**: `render.py` turns `plan.json` into an
+   actual video using ffmpeg. You never hand-edit video directly; you review
+   a fast low-res preview and give notes, and the plan gets updated.
+
+Every plan is anchored to *source time* — seconds into the original clip —
+so re-ordering or re-cutting never breaks graphics, B-roll, or sound effects
+tied to a moment.
+
+## Layout
+
+- `tools/` — the pipeline scripts (this repo, version-controlled).
+- `config.json` (not committed — copy `config.example.json`) — points the
+  tools at your footage location, which differs per machine.
+- Your footage root gets a `_editor/` folder added next to it:
+  - `_editor/work/<video>/` — transcripts, plans, rendered output for one video.
+  - `_editor/assets/` — shared, reusable stuff: free fonts, emoji/icons, sound
+    effects, pulled in by `fetch_assets.py` with license info recorded.
+- `.claude/skills/youtube-edit/` — everything Claude has learned so far:
+  tool quirks, real measurements, and your editing taste. Read automatically
+  whenever Claude works in this repo.
+
+## What's built so far
+
+- `transcribe.py` — speech-to-text with word timestamps
+- `render.py` — turns a plan into a finished video
+- `fetch_assets.py` — free emoji, fonts, and sound effects (all license-checked)
+- `thumbnail.py` — generates thumbnail candidates from your footage
+
+Still to come: automatic pause-trimming, speaker detection, punch-ins,
+pacing checks, and a few other tools — see the skill file for the full list
+and current status.

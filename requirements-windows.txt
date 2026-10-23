@@ -1,0 +1,14 @@
+# GPU stack for the Windows machine. torch needs its own --index-url, see setup notes.
+# pip install torch --index-url https://download.pytorch.org/whl/cu121
+# CPU-only machine (no NVIDIA): use https://download.pytorch.org/whl/cpu instead.
+# Don't install torchaudio: nothing needs it, and Smart App Control blocks its DLL.
+nemo_toolkit[asr]
+# Pinned below the newest release: Smart App Control blocks the brand-new
+# onnx/pyarrow DLLs (not yet reputable); these older builds load fine.
+onnx==1.19.1
+pyarrow==24.0.0
+numpy
+opencv-python
+librosa
+pyloudnorm
+soundfile
