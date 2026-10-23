@@ -6,7 +6,14 @@ never a project-timeline time -- see transcribe.py. The plan is a list of
 segments, played in order:
 
     {"clip": "cam", "start": 4.1, "end": 10.9}
-        A piece of one clip, its own audio. Optional "speed" (default 1).
+        A piece of one clip, its own audio. Optional "speed" (default 1,
+        slow-mo below 1, fast-forward above -- audio tempo is chained across
+        multiple atempo filters since ffmpeg rejects a single atempo outside
+        0.5-2.0). Optional "zoom": {"factor": 1.3, "cx": 0.5, "cy": 0.4,
+        "ease_in": 0.3, "ease_out": 0.3} for a punch-in -- eases from 1x to
+        "factor" over ease_in seconds of the segment's own (post-speed)
+        output duration, holds, eases back out over the last ease_out
+        seconds. cx/cy (0-1, default centered) is the zoom target point.
     {"photo": "IMG_0887.HEIC", "duration": 1.5}
         A still with a slow push-in, silent.
     {"block": "phone", "video": [{"clip": "rec", "start": .., "end": .., "speed": ..}, ...],
@@ -71,6 +78,44 @@ def audio_fades(dur: float) -> str:
     return f"afade=t=in:d={FADE},afade=t=out:st={max(dur - FADE, 0):.3f}:d={FADE}"
 
 
+def atempo_chain(speed: float) -> str:
+    """atempo rejects a single value outside 0.5-2.0 (confirmed: ffmpeg
+    errors 'out of range' even though its own docs claim up to 100) -- chain
+    multiple instances to cover real slow-mo/fast-forward speeds."""
+    filters, remaining = [], speed
+    while remaining < 0.5:
+        filters.append(0.5)
+        remaining /= 0.5
+    while remaining > 2.0:
+        filters.append(2.0)
+        remaining /= 2.0
+    filters.append(remaining)
+    return ",".join(f"atempo={f:.6f}" for f in filters)
+
+
+def zoom_filter(zoom: dict, dur: float, src: str, out: str) -> str:
+    """Punch-in via zoompan (crop's w/h are only evaluated once at filter
+    init in this ffmpeg build -- confirmed by testing, so a time-varying
+    crop size doesn't work; zoompan is the filter actually built for this,
+    and render_photo already relies on it for push-ins). d=1 so every
+    output frame consumes the next real input frame -- motion keeps playing
+    instead of freezing on one frame like a photo push-in does. Expressions
+    use 'on' (output frame number), eased in/held/eased out in frames."""
+    factor = zoom.get("factor", 1.3)
+    cx, cy = zoom.get("cx", 0.5), zoom.get("cy", 0.5)
+    ease_in = min(zoom.get("ease_in", 0.3), dur / 2)
+    ease_out = min(zoom.get("ease_out", 0.3), dur / 2)
+    total_f = max(round(dur * FPS), 1)
+    in_f = max(round(ease_in * FPS), 1)
+    out_f = max(total_f - round(ease_out * FPS), in_f)
+    z = (f"if(lt(on,{in_f}),1+({factor}-1)*on/{in_f},"
+         f"if(lt(on,{out_f}),{factor},"
+         f"{factor}-({factor}-1)*(on-{out_f})/{max(total_f - out_f, 1)}))")
+    x = f"min(max(iw*{cx}-(iw/zoom/2),0),iw-iw/zoom)"
+    y = f"min(max(ih*{cy}-(ih/zoom/2),0),ih-ih/zoom)"
+    return f"[{src}]zoompan=z='{z}':x='{x}':y='{y}':d=1:s={W}x{H}:fps={FPS}[{out}]"
+
+
 def render_clip(seg, clips, root, out: Path):
     c = clips[seg["clip"]]
     path = root / c["file"]
@@ -78,11 +123,15 @@ def render_clip(seg, clips, root, out: Path):
     dur = (seg["end"] - seg["start"]) / speed
     track = c.get("audio_track", 0)
     fc = (f"[0:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS}[v0];"
-          + layout_filter(c.get("layout", "fill"), "v0", "v"))
+          + layout_filter(c.get("layout", "fill"), "v0", "v1"))
+    if "zoom" in seg:
+        fc += ";" + zoom_filter(seg["zoom"], dur, "v1", "v")
+    else:
+        fc += ";[v1]null[v]"
     cmd = ["ffmpeg", "-nostdin", "-y", "-v", "error",
            "-ss", f"{seg['start']:.3f}", "-to", f"{seg['end']:.3f}", "-i", str(path)]
     if has_audio(path, track):
-        fc += f";[0:a:{track}]atempo={speed},{audio_fades(dur)}[a]"
+        fc += f";[0:a:{track}]{atempo_chain(speed)},{audio_fades(dur)}[a]"
     else:
         cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
         fc += ";[1:a]anull[a]"

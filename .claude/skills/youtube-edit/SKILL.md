@@ -127,6 +127,60 @@ possible if its a youtube video. have it prompt to ask"):
   moment, what the graphic would show, and let her confirm/adjust before
   `graphics.py` gets run for real.
 
+## render.py: speed changes and punch-in zoom (added 2026-10-23, her call: "does it have the ability to zoom in and out on a frame? do slow motion or speed it up?")
+
+- **Speed was already supported but had a real bug**, caught by testing
+  before shipping: `atempo={speed}` directly on a single filter -- ffmpeg's
+  `atempo` hard-rejects anything outside 0.5-2.0 (confirmed: a real
+  slow-mo render at 0.3x failed with "Value 0.300000 ... out of range").
+  Fixed with `atempo_chain()`, which decomposes any speed into a chain of
+  per-filter factors each within range (e.g. 0.3x -> atempo=0.5,atempo=0.6).
+  Verified for real: 0.3x and 3.0x renders of real footage both now succeed.
+- **Punch-in zoom is new** (`"zoom": {"factor", "cx", "cy", "ease_in",
+  "ease_out"}` on a clip segment). First attempt used `crop` with
+  time-varying `w`/`h` expressions referencing `t` and an `eval=frame`
+  option copied from memory of other filters (`scale` has that option,
+  `crop` does not) -- **wrong on two counts**, caught by testing: `crop`
+  has no `eval` option at all, and more importantly **`crop`'s `w`/`h` are
+  only evaluated once at filter init in this ffmpeg build, not per-frame**
+  (only `x`/`y` re-evaluate per frame) -- a `t`-dependent `h` alone fails
+  with "Error when evaluating the expression", isolated with a minimal
+  standalone ffmpeg command before touching the real code. Correct
+  approach, and what the original brief actually specified: `zoompan`
+  (already used for photo push-ins elsewhere in this file), with `d=1` so
+  every output frame consumes the next real input frame -- motion keeps
+  playing through the zoom instead of freezing like a photo push-in does.
+  **Verified visually, not just by exit code**: rendered a zoom on real
+  footage, pulled frames at the start/mid/end, confirmed wide -> genuinely
+  zoomed-in -> wide, with real hand/body motion visibly continuing at each
+  point (proves it isn't frozen on one frame).
+
+## catalog_music.py (new, 2026-10-23, her call: she wants to be able to
+provide a music folder eventually and have the pipeline catalog it)
+
+- Reads `config.json`'s `music_dir` (currently unset -- she'll provide a
+  path later), measures BPM (`librosa.beat.beat_track`), integrated LUFS
+  (`pyloudnorm`), energy swing (90th-10th percentile of short-term RMS in
+  dB -- how much a track swings between quiet/loud sections), brightness
+  (mean spectral centroid, Hz), and vocals via transcribing each track and
+  checking for 50+ words (reuses `transcribe.py`'s functions directly) --
+  matches her original spec for this tool exactly.
+- Writes `<footage_root>/_editor/assets/music/catalog.json` with an
+  absolute `source_path` back into `music_dir` -- **never writes into
+  music_dir itself**, since that's her own external folder, not ours to
+  modify (same boundary as raw footage folders).
+- **Verified for real** (no real music folder exists yet): built a
+  synthetic 120 BPM click track (numpy + soundfile) and ran it through the
+  non-NeMo measurements -- detected 117.5 BPM (normal beat-tracker
+  tolerance, not exact but in the right range), -24.7 LUFS, 436 Hz
+  brightness, all sane real numbers from real signal processing, not
+  placeholders. Vocals detection depends on NeMo like the other
+  NeMo-facing tools -- degrades gracefully (`has_vocals: null` with a note)
+  if NeMo isn't installed/working, rather than crashing the whole catalog
+  run; not yet verified against a real vocal track.
+- `--skip-vocals` flag skips the NeMo step entirely for a fast, GPU-free
+  catalog pass (useful for just getting bpm/LUFS/brightness quickly).
+
 ## Tool gotchas (confirmed or carried over from Liz's own prior experience)
 
 - **transcribe.py**: pass audio to NeMo as a numpy float32 array, never a path —

@@ -50,6 +50,12 @@ tied to a moment.
   transparent overlay, for `render.py` to composite over footage
 - `speakers.py` — identifies who's speaking per segment via voiceprints
   (two-speaker footage only; not yet verified on real hardware)
+- `catalog_music.py` — measures BPM/LUFS/energy/brightness/vocals for a
+  folder of background music (point `music_dir` in `config.json` at it
+  once you have one)
+
+`render.py` also supports slow-motion/fast-forward (`"speed"`) and
+punch-in zooms (`"zoom"`) on clip segments — see its docstring.
 
 Still to come: automatic pause-trimming, punch-ins, pacing checks, and a few
 other tools — see the skill file for the full list and current status.
