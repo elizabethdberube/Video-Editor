@@ -109,6 +109,24 @@ same as any editor would, not force every file in the folder into the final
 cut. Treat "many clips and photos available" as a pool to select from, not a
 checklist to exhaust.
 
+## Editorial principle: prefer graphics for YouTube, but ask first
+
+Liz confirmed (2026-10-23, her call: "update it so it uses graphics where
+possible if its a youtube video. have it prompt to ask"):
+
+- Since every video here is for YouTube, **default toward a motion graphic**
+  when a moment explains a physical/technical idea (how something works,
+  what a part does, a before/after, a number/spec) — graphics are the
+  default tool for that job here, not just one option among several. The
+  existing guardrail still applies: if an idea genuinely won't draw cleanly,
+  cut back to the speaker instead of forcing a bad graphic.
+- **Before adding a graphic to a plan, ask her in chat first** — don't
+  silently decide a moment gets a graphic and render it. This is specific to
+  graphics; it does not change the general workflow (she reviews low-res
+  previews and gives notes on the rest of the edit). Surface the candidate
+  moment, what the graphic would show, and let her confirm/adjust before
+  `graphics.py` gets run for real.
+
 ## Tool gotchas (confirmed or carried over from Liz's own prior experience)
 
 - **transcribe.py**: pass audio to NeMo as a numpy float32 array, never a path —
@@ -165,6 +183,35 @@ checklist to exhaust.
   "IS IT WORTH IT?" in bold white Bebas Neue with a black border, clearly
   legible over a real frame of the Everblog tablet. Not yet in the original
   11-tool list; this is net-new scope she asked to add.
+- **graphics.py** (new, 2026-10-23, her call: "add TitaNet and HyperFrames"):
+  renders a callout graphic (icon + bold text, animates in/out) to a
+  transparent ProRes 4444 MOV via HyperFrames (HTML+GSAP -> video), for
+  `render.py` to composite over footage. **Confirmed working for real,
+  pixel-checked**: rendered a "CHECK THE FUSE FIRST" callout with a
+  warning-triangle OpenMoji icon and Bebas Neue text, `ffprobe` confirms
+  `prores`/`yuva444p12le`, and I sampled actual RGBA pixel values —
+  background alpha=0 (fully transparent), badge alpha=255 (fully opaque),
+  soft partial alpha at the drop-shadow edge. Not a guess from docs; actually
+  measured. **Requires Node >=22 on PATH** (`npx hyperframes` fails/needs a
+  real Node on this box's default v12 -- used `nvm use 22`; Windows setup
+  needs its own Node >=22, e.g. `winget install OpenJS.NodeJS.LTS`, not yet
+  verified there). HyperFrames itself is a HeyGen product with an optional
+  cloud tier (`hyperframes cloud`/`lambda`/`auth`) — **never use those**,
+  only local rendering (`init`, `render`, `check`), to keep this free/local
+  per her original requirement.
+- **speakers.py** (new, 2026-10-23, her call): TitaNet voiceprints per
+  pause-bounded segment, numpy 2-means (no sklearn dependency), labels the
+  cluster nearest a `--reference-clip` solo-you clip as "me". **Partially
+  verified**: segment-grouping (splits correctly on >0.5s pauses) and the
+  k-means math (cleanly separates synthetic well-separated clusters) checked
+  locally with real assertions. The NeMo-facing calls
+  (`EncDecSpeakerLabelModel.from_pretrained(...)`, `.get_embedding(path)`)
+  are **unverified** — written from documentation, same position
+  `transcribe.py` was in before Windows corrected some of its assumptions.
+  Only makes sense for two-speaker footage — her content is mostly solo
+  DIY/review narration (see "Channel" above), so check whether a given video
+  actually has two speakers before running this; forcing a 2-way split on
+  one voice just clusters noise into a meaningless split.
 - **Free source map for future reference** (not yet built into tooling beyond
   emoji/sfx above): YouTube Audio Library is the only source structurally
   immune to Content ID claims (YouTube clears it directly) but has no API —

@@ -32,13 +32,24 @@ tied to a moment.
   tool quirks, real measurements, and your editing taste. Read automatically
   whenever Claude works in this repo.
 
+## Setup notes
+
+- Needs **Node >=22** on PATH for `graphics.py` (it shells out to
+  `npx hyperframes`). If your default `node` is older, install a current one
+  (e.g. `winget install OpenJS.NodeJS.LTS` on Windows, or `nvm install 22`).
+  HyperFrames has an optional paid cloud tier — this pipeline only ever uses
+  its local rendering, never `hyperframes cloud`/`lambda`/`auth`.
+
 ## What's built so far
 
 - `transcribe.py` — speech-to-text with word timestamps
 - `render.py` — turns a plan into a finished video
 - `fetch_assets.py` — free emoji, fonts, and sound effects (all license-checked)
 - `thumbnail.py` — generates thumbnail candidates from your footage
+- `graphics.py` — renders a motion-graphic callout (icon + text) to a
+  transparent overlay, for `render.py` to composite over footage
+- `speakers.py` — identifies who's speaking per segment via voiceprints
+  (two-speaker footage only; not yet verified on real hardware)
 
-Still to come: automatic pause-trimming, speaker detection, punch-ins,
-pacing checks, and a few other tools — see the skill file for the full list
-and current status.
+Still to come: automatic pause-trimming, punch-ins, pacing checks, and a few
+other tools — see the skill file for the full list and current status.
