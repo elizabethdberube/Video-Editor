@@ -135,6 +135,25 @@ and to every edit before it's handed over.
   20.4-24.2s App Store install sheet (Apple ID email; cut 20.0-24.4);
   105-112.9s tablet share code being typed (cut 104.0-113.2).
 
+## Rule: she must not say "tablet" (Liz, 2026-10-23)
+
+Her words: "I'm not suppose to say tablet that needs to be edited out."
+(No reason given -- likely how the brand wants the product described; ask
+before assuming it extends to other words like "iPad" or "screen".)
+
+- Search every transcript word in the plan's kept ranges (clip segments
+  AND block audio pieces) for "tablet" and near-misses ("tab...", "table")
+  before rendering -- Parakeet can mishear it.
+- Cut at a sentence boundary rather than splicing just the word out:
+  IMG_0895 34.4-45.4 "...and then it syncs, [?] right from the tablet, then
+  it syncs with my phone" became end-at-42.50 ("...and then it syncs.") so
+  the next clip "I don't need to actually do anything" follows naturally.
+- Known occurrences: IMG_0895 43.44 (cut), old video 108.0 (not used).
+- **Verify on the finished file**: transcribe the rendered mp4 and search
+  it -- that checks what viewers actually hear. Done for video1 + video2
+  (no hits).
+- Products shown on screen are fine; the rule is about her speech.
+
 ## Editorial principle: pick and choose, don't dump everything in
 
 Liz confirmed (2026-10-23): a video's raw folder does not have to end up fully
@@ -415,6 +434,12 @@ provide a music folder eventually and have the pipeline catalog it)
   Music: Nico Staf "Sunny Travel" -> Riot "Safety Net" (YouTube Audio
   Library artists). The four `Track*.mp3` in _music have unknown source --
   ask her before using them. All six are instrumental (catalog_music).
+- video2 revisions (2026-10-23): she asked to swap the photos of her for
+  others in the folder -> lead-in now IMG_0890 + IMG_0892 (pointing at the
+  fridge screen), pre-sign-off IMG_0882 (smiling, living room, matches the
+  sign-off location); photos held 2.5s. Then "add a few seconds on":
+  sign-off starts at old 172.30 ("It helps plan your life. Really
+  irreplaceable. Super nice.") -> exactly 5:00.
 - New footage IMG_0942.mov: living-room talking head (AI features
   summary), recorded upside down (rotation=-180, ffmpeg autorotates fine),
   speech -29.5 LUFS (quiet, camera far away). Two Gemini AI images (receipts
