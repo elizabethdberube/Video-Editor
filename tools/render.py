@@ -123,6 +123,10 @@ Plan-level options:
         any clip (or a transcribed voiceover file) gets captioned wherever
         the plan uses it.
 
+A clip can set "restore": true when its file was heavily compressed (e.g.
+sent through WhatsApp): deblock + denoise at source size, lanczos upscale,
+light sharpen. It can't bring back lost detail -- originals are always better.
+
 "clips" maps short ids to files under footage_root. Each clip's "layout" is
 "fill" (crop to 16:9, default) or "vertical" (phone screen centred over a
 blurred copy of itself). "audio_track" picks the audio stream (default 0;
@@ -251,15 +255,26 @@ def n_inputs(cmd) -> int:
     return cmd.count("-i")
 
 
-def layout_filter(layout: str, src: str, out: str) -> str:
+def layout_filter(layout: str, src: str, out: str, restore=False) -> str:
+    """restore: the source was heavily compressed (e.g. sent over WhatsApp),
+    so upscale with lanczos and add a light sharpen after; the deblock/denoise
+    half runs before this, at source resolution (see RESTORE_PRE)."""
+    flags, post = (":flags=lanczos", "," + RESTORE_POST) if restore else ("", "")
     if layout == "vertical":
         return (f"[{src}]split[bg][fg];"
                 f"[bg]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
                 f"boxblur=40:2,eq=brightness=-0.12[bgb];"
-                f"[fg]scale=-2:{H - 40}[fgs];"
+                f"[fg]scale=-2:{H - 40}{flags}{post}[fgs];"
                 f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1[{out}]")
-    return (f"[{src}]scale={W}:{H}:force_original_aspect_ratio=increase,"
-            f"crop={W}:{H},setsar=1[{out}]")
+    return (f"[{src}]scale={W}:{H}:force_original_aspect_ratio=increase{flags},"
+            f"crop={W}:{H}{post},setsar=1[{out}]")
+
+
+# Clean-up for heavily compressed sources (clip option "restore": true).
+# Chosen by side-by-side on 848x478 WhatsApp footage: crisper text/logos than
+# a plain upscale; nlmeans looked almost the same but rendered 11x slower.
+RESTORE_PRE = "deblock=filter=strong:block=8,hqdn3d=2:1.5:3:3"
+RESTORE_POST = "unsharp=5:5:0.7:5:5:0"
 
 
 def atempo_chain(speed: float) -> str:
@@ -598,7 +613,7 @@ def clip_graph(seg, clips, root, wd, cmd, dur, cleanup):
     track = c.get("audio_track", 0)
     i = n_inputs(cmd)
     cmd += ["-ss", f"{seg['start']:.3f}", "-to", f"{seg['end']:.3f}", "-i", str(path)]
-    pre = ""
+    pre = "," + RESTORE_PRE if c.get("restore") else ""
     if seg.get("stabilize"):
         pre += stab_filter(seg, stab_file(seg, clips, root, wd))
     reverse = seg.get("reverse")
@@ -611,7 +626,7 @@ def clip_graph(seg, clips, root, wd, cmd, dur, cleanup):
     if seg.get("reframe") is not None and c.get("layout", "fill") == "fill":
         fc += reframe_filter(seg, c, root, wd, "v0", "v1")
     else:
-        fc += layout_filter(c.get("layout", "fill"), "v0", "v1")
+        fc += layout_filter(c.get("layout", "fill"), "v0", "v1", c.get("restore", False))
     if "zoom" in seg:
         fc += ";" + zoom_filter(seg["zoom"], dur, "v1", "vb")
     else:

@@ -110,7 +110,7 @@ normalised, so it may play a bit quieter or louder than the final.
 
 - **Background music:** put tracks in the folder set as `music_dir` in
   `config.json` (on the Windows laptop:
-  `C:\Users\eliza\OneDrive\Desktop\YouTube\_music`). Use only music you're
+  `C:\Users\eliza\Videos\YouTube\_music`). Use only music you're
   allowed to use on YouTube, such as the YouTube Audio Library.
 - **Finished videos:** `<footage root>\_editor\work\<video>\<video>.mp4`.
 
