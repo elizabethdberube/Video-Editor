@@ -100,6 +100,41 @@ still concatenates clips onto a display timeline, purely for human review —
 editing tools must use the per-clip source time in the JSON, never the SRT's
 times.
 
+## Rule: edit out personal information, always (Liz, 2026-10-23)
+
+Her words: "edit out any passwords or emails or address any personal
+information like that". This applies to every video, without being asked,
+and to every edit before it's handed over.
+
+- **What counts:** passwords (typed or visible), email addresses (including
+  the Apple ID on App Store install sheets and account/login screens), home
+  or mailing addresses, phone numbers, verification/2FA codes, device
+  pairing/share codes and anything else that grants access, payment or
+  card details, full names of family members, house numbers, street signs
+  or mail visible in shots, license plates, and notifications popping up
+  on a screen recording. Her first name "Liz" is fine: she says it on camera.
+- **Where it hides:** screen recordings above all (sign-up/login, App Store
+  sheets, settings, notification banners), device screens filmed in
+  footage, paperwork/mail/packages in B-roll, and photos.
+- **Before rendering:** scan every screen-recording range and on-screen
+  device the plan uses with dense frame sheets (1 fps minimum, 10 fps
+  around anything suspicious) and read them. Don't assume a range is clean
+  because the obvious part (e.g. login) was skipped -- video1/video2 both
+  shipped an App Store sheet with her email until she spotted it.
+- **Prefer cutting over blurring.** A cut can't fail; a blur on something
+  that moves or animates (sheets sliding in, scrolling) easily misses frames.
+  If it must stay visible, blur or box it and check every frame.
+- **Leave margin at cuts, then check every frame at each join.** Her screen
+  recordings are VFR: seeking to the exact boundary leaked one frame of the
+  App Store sheet (start 24.2 showed a frame from before 24.2). Cut ~0.2s
+  wide and inspect the finished video frame by frame across the join.
+- Tell her what was found and removed. The raw files still contain it, so
+  mention that if she shares raw footage.
+- **Known ranges in current footage** (RecordIt-1791828181.mp4, never use):
+  30-99s login/registration (email, typed password, verification code);
+  20.4-24.2s App Store install sheet (Apple ID email; cut 20.0-24.4);
+  105-112.9s tablet share code being typed (cut 104.0-113.2).
+
 ## Editorial principle: pick and choose, don't dump everything in
 
 Liz confirmed (2026-10-23): a video's raw folder does not have to end up fully
@@ -200,6 +235,20 @@ possible if its a youtube video. have it prompt to ask"):
   loudnorm. Profiling showed loudnorm was 30s of every render (it works at
   192kHz internally) and the HEVC phone block ~22s; segments themselves are
   fast. Full render of video1 198s, preview 67s.
+- **video2 additions (2026-10-23)**: `"broll"` full-frame cutaways (photo
+  push-in or clip, segment audio continues), music playlist (`"files"`,
+  crossfaded, gain-matched to `level_lufs` from catalog_music's catalog),
+  per-segment `"music": false` (ramped 1s), and `"voice_level_lufs"`
+  per-segment speech levelling. Measured on video2: speech spread across
+  sections 10 dB -> 1.9 dB; music -33 LUFS sits ~18 dB under her voice.
+- **ffmpeg gotcha (real, caught on video2)**: crossfaded mp3s -> `adelay`
+  (92.7s) -> `apad` -> `atrim` silently lost the delay (music started at 0
+  and ran out ~200s in), though each filter behaves alone and short
+  synthetic tests pass. Fixed by concatenating real anullsrc silence in
+  front. Also: atrim/trim positional args map to start, then `starti` (an
+  alias of start) per `ffmpeg -h filter=atrim`, not start/end -- always
+  write `end=` explicitly. Verify music by subtracting the voice-only
+  joined.mp4 from the preview mix (preview skips loudnorm, so it's exact).
 - Lost once: a `git pull` that reset to a rewritten origin/main wiped this
   work while it was uncommitted, and it was re-merged on top of the
   atempo_chain/zoom version. Commit render.py changes promptly.
@@ -357,6 +406,19 @@ provide a music folder eventually and have the pipeline catalog it)
   her rather than guessing. An Amazon cut gets voice/clip audio only.
   render.py enforces it: a plan with `"music"` must also say
   `"destination": "youtube"` or the render stops.
+- **Her older Everblog video has music baked in** (she confirmed,
+  2026-10-23). Any segment from it gets `"music": false` so two songs never
+  play at once; keep its block voiceover in one continuous piece so its
+  baked music doesn't jump at cuts.
+- video2 brief (2026-10-23): ~5 min, "talking throughout and background
+  music". Result 4:55, all talking except the 10s sting and 4.5s of photos.
+  Music: Nico Staf "Sunny Travel" -> Riot "Safety Net" (YouTube Audio
+  Library artists). The four `Track*.mp3` in _music have unknown source --
+  ask her before using them. All six are instrumental (catalog_music).
+- New footage IMG_0942.mov: living-room talking head (AI features
+  summary), recorded upside down (rotation=-180, ffmpeg autorotates fine),
+  speech -29.5 LUFS (quiet, camera far away). Two Gemini AI images (receipts
+  pile, grocery bags) used as B-roll for receipt scanning / food.
 - **No captions** (Liz, 2026-10-23, right after I built burned-in
   captions): "I dont want captions". Keep `"captions"` off in plans; the
   feature stays in render.py, off by default, but don't add it unless she

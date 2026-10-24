@@ -61,11 +61,12 @@ Plan-level options:
         still works for a single track. Refused for Amazon videos: Liz's
         rule is music on YouTube videos only.
     "voice_level_lufs": -20
-        Gain every clip's own audio (and voiceover files) so they all sit at
-        the same loudness before mixing, measured once per file and cached
-        in <work_dir>/loudness.json. Without it, sources recorded at
-        different distances play several dB apart and music swamps the
-        quiet ones.
+        Gain every segment's own audio (and block voiceover pieces) so they
+        all sit at the same loudness before mixing. Each piece of 3s or more
+        is measured on its own; shorter ones use their whole file's level.
+        Measurements are cached in <work_dir>/loudness.json. Without it,
+        sources recorded at different distances play several dB apart and
+        music swamps the quiet ones.
     "voice_cleanup": true
         Rumble cut, noise reduction, a little presence and gentle
         compression on every clip's own audio and clip voiceover pieces

@@ -64,6 +64,13 @@ tied to a moment.
 - **background music** (`"music"`) that dips automatically while you talk.
   YouTube videos only: the plan must say `"destination": "youtube"`, and
   Amazon videos never get music.
+- **B-roll cutaways** (`"broll"`): cut to a photo or another clip while
+  you keep talking
+- **voice levelling** (`"voice_level_lufs"`): evens out clips recorded at
+  different distances so every section plays at the same volume
+- **music playlists** (`"music": {"files": [...]}`), crossfaded and
+  volume-matched using `catalog_music.py`'s measurements, and
+  `"music": false` on any segment that already has its own music
 - **graphics overlays** (`"overlays"`): put the transparent callouts that
   `graphics.py` makes on top of a segment, at a moment in the source clip
 - **sound effects** (`"sfx"`): whooshes, pops, etc. from `_editor/assets/sfx/`
