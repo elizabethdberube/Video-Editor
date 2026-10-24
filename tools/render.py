@@ -490,23 +490,28 @@ def audio_graph(plan, cfg, inputs) -> str:
             f"[voice][ducked]amix=inputs=2:duration=first:normalize=0[mix]")
 
 
-def finalise(plan, cfg, joined: Path, wd: Path, final: Path, captions: Path | None):
+def finalise(plan, cfg, joined: Path, wd: Path, final: Path, captions: Path | None, normalise=True):
     inputs = ["-i", str(joined)]
     agraph = audio_graph(plan, cfg, inputs)
 
-    # Two-pass loudnorm on the final mix. Single-pass only approaches the
-    # target (measured -16.6 LUFS for a -14 target on video1); measuring
-    # first and applying one linear gain hits it.
-    proc = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", *inputs, "-filter_complex",
-                           f"{agraph};[mix]loudnorm={LOUDNORM}:print_format=json[out]",
-                           "-map", "[out]", "-f", "null", "-"],
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    err = proc.stderr.decode(errors="replace")
-    m = json.loads(err[err.rindex("{"):err.rindex("}") + 1])
-    loudnorm = (f"loudnorm={LOUDNORM}:linear=true:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
-                f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:offset={m['target_offset']}")
+    if normalise:
+        # Two-pass loudnorm on the final mix. Single-pass only approaches the
+        # target (measured -16.6 LUFS for a -14 target on video1); measuring
+        # first and applying one linear gain hits it. Costs ~30s on a 5 min
+        # video (loudnorm works at 192kHz internally), so previews skip it.
+        proc = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", *inputs, "-filter_complex",
+                               f"{agraph};[mix]loudnorm={LOUDNORM}:print_format=json[out]",
+                               "-map", "[out]", "-f", "null", "-"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        err = proc.stderr.decode(errors="replace")
+        m = json.loads(err[err.rindex("{"):err.rindex("}") + 1])
+        level = (f"loudnorm={LOUDNORM}:linear=true:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
+                 f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:"
+                 f"offset={m['target_offset']},aresample=48000")
+    else:
+        level = "anull"
 
-    fc = f"{agraph};[mix]{loudnorm},aresample=48000[a]"
+    fc = f"{agraph};[mix]{level}[a]"
     if captions:
         # Relative filename (ffmpeg runs in wd) avoids escaping the drive colon;
         # fontsdir points libass at Windows fonts since there's no fontconfig.
@@ -576,10 +581,10 @@ def main():
         print(f"{len(chunks)} caption chunks", file=sys.stderr)
 
     final = Path(args.out) if args.out else wd / f"{args.name}{'_preview' if args.preview else ''}.mp4"
-    print("final mix: " + ", ".join(x for x in [
-        "music" if plan.get("music") else "", "captions" if captions else "", "loudness -14 LUFS"] if x),
-        file=sys.stderr)
-    finalise(plan, cfg, joined, wd, final.resolve(), captions)
+    steps = [x for x in ["music" if plan.get("music") else "", "captions" if captions else "",
+                         "" if args.preview else "loudness -14 LUFS"] if x]
+    print("final mix: " + (", ".join(steps) or "join only"), file=sys.stderr)
+    finalise(plan, cfg, joined, wd, final.resolve(), captions, normalise=not args.preview)
     print(f"wrote {final}")
 
 

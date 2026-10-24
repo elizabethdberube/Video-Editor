@@ -64,8 +64,20 @@ tied to a moment.
 - **background music** (`"music"`) that dips automatically while you talk.
   YouTube videos only: the plan must say `"destination": "youtube"`, and
   Amazon videos never get music.
+- **graphics overlays** (`"overlays"`): put the transparent callouts that
+  `graphics.py` makes on top of a segment, at a moment in the source clip
+- **sound effects** (`"sfx"`): whooshes, pops, etc. from `_editor/assets/sfx/`
+  (download them with `fetch_assets.py sfx`), placed at a moment in the clip
+- **voice cleanup** (`"voice_cleanup": true`): cuts rumble and background
+  noise, adds a little clarity, and dips the pauses between sentences
 - burned-in captions (`"captions": true`) built from the transcript. Off
   by default, and not used on this channel's videos.
+
+**Quick preview:** `python tools/render.py --name video1 --preview` renders
+a small 960×540 copy (`video1_preview.mp4`) about 3× faster than a full
+render (about 1 minute vs about 3½ for a 5-minute video on the Windows
+laptop), so you can review a cut before the full render. Its loudness isn't
+normalised, so it may play a bit quieter or louder than the final.
 
 ## Where things go
 

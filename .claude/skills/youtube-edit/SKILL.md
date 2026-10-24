@@ -175,6 +175,31 @@ possible if its a youtube video. have it prompt to ask"):
   real durations, not plan maths, because frame rounding drifts. libass on
   Windows needs `fontsdir='C\:/Windows/Fonts'`, and ffmpeg runs with cwd =
   work dir so the .ass path has no drive colon to escape.
+- `"overlays"` (graphics.py ProRes 4444 or PNG+duration) and `"sfx"` per
+  segment; `"at"` is clip SOURCE time on clip segments, seconds-in on
+  photo/block segments; out-of-range items warn and skip. Verified: test
+  callout absent at 5.0s, present at 6.5s, gone at 8.7s for at=75.0 on cam
+  69.4-; transparency correct. Sfx verified by subtracting tracks: the only
+  difference sat at 5.45-5.70s (planned 5.4s), rest -73 dB. Test-asset
+  gotcha: ffmpeg `drawbox` doesn't write alpha, so a drawbox in a yuva test
+  graphic comes out invisible -- not a render.py bug.
+- **graphics.py can't run on the Windows laptop yet**: Node there is v20
+  (nvm4w), HyperFrames needs >=22, and no fonts/emoji are fetched. Freesound
+  sfx also needs `freesound_api_key` in config.json, not set up.
+- `"voice_cleanup": true` (plan-level; clip opt-out). Measured on IMG_0895:
+  her iPhone audio is already clean (noise floor ~-54 dB), so gains are
+  modest: voice-to-pause gap 29.3 -> 37.8 dB, mostly from the gentle gate.
+  First version with a compressor did nothing (29.2 dB) because makeup gain
+  lifted pauses as much as NR lowered them -- always measure the gap
+  (speech RMS minus pause RMS), not absolute levels, since loudnorm rescales.
+  Enabled in video1. She hasn't listened to it yet.
+- Music ducking verified with a synthetic track by subtracting no-music
+  from music mixes: music -34.4 dB alone, -39 to -43 dB under voice (5-8.5
+  dB duck), 17-21 dB below her voice. Re-tune volume_db with a real track.
+- `--preview`: 960x540, ultrafast, separate render_preview/ dir, and skips
+  loudnorm. Profiling showed loudnorm was 30s of every render (it works at
+  192kHz internally) and the HEVC phone block ~22s; segments themselves are
+  fast. Full render of video1 198s, preview 67s.
 - Lost once: a `git pull` that reset to a rewritten origin/main wiped this
   work while it was uncommitted, and it was re-merged on top of the
   atempo_chain/zoom version. Commit render.py changes promptly.
