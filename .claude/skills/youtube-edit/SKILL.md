@@ -7,6 +7,8 @@ description: Personal knowledge for Liz's automated YouTube editing pipeline (eg
 
 Personal skill for building and operating Liz's local YouTube editing pipeline.
 Update this file in the same turn whenever she gives feedback — don't let it go stale.
+Keep it general: one-off details of a single video don't belong here (she asked
+for the notes from a one-time sponsored video to be removed, 2026-10-24).
 
 ## Project facts
 
@@ -31,8 +33,8 @@ Update this file in the same turn whenever she gives feedback — don't let it g
   `C:\Users\eliza\Video-Editor`, venv `.venv` (Python 3.12.10, CPU torch, NeMo
   3.0.0), ffmpeg 9.0.2 via winget. Footage at
   `C:\Users\eliza\OneDrive\Desktop\YouTube` (OneDrive Desktop). Liz chose to run
-  the full pipeline CPU-only here. Measured: Parakeet on CPU transcribed the
-  32s IMG_0894 in 3.6s, so CPU transcription is fine for her short clips.
+  the full pipeline CPU-only here. Measured: Parakeet on CPU transcribed a
+  32s clip in 3.6s, so CPU transcription is fine for her short clips.
   Smart App Control blocks DLLs from brand-new wheels (onnx 1.23.2, pyarrow
   26, torchaudio CPU) with "An Application Control policy has blocked this
   file". Fix by pinning an older release (see requirements-windows.txt), never
@@ -53,37 +55,31 @@ Update this file in the same turn whenever she gives feedback — don't let it g
 - `config.json` (gitignored) holds `footage_root` (Linux path) and
   `footage_root_windows` (Windows path); `tools/config.py` picks the right one by
   `platform.system()`. `config.example.json` is the committed template.
+  `music_dir` on the Windows laptop is `<footage_root>/_music`.
 
-## Test video footage (first real video, from /home/taytay/Desktop/YouTube)
+## Her footage: what to expect
 
-- `IMG_0894.MOV` (32.4s) + `IMG_0895.MOV` (174.8s / ~2:55): raw clips, 1920x1080
-  h264 yuv420p, **variable frame rate** (~30fps nominal but fractional
-  avg_frame_rate — classic iPhone VFR). `render.py`'s CFR-conversion step is not
-  optional for this footage.
-- Audio has **two tracks** per clip: stream `0:a:0` is normal AAC stereo 48kHz
-  (`mp4a`, "Core Media Audio" handler) — this is the one to transcribe. Stream
-  `0:a:1` is a 4-channel `apac` track (Apple spatial/positional audio capture) —
-  ffprobe can't even name its codec; do not feed this to NeMo or treat it as a
-  normal audio stream. Always pass `-map 0:a:0` explicitly, never "the first audio
-  stream found" blindly.
-- 9 HEIC stills (IMG_0882-0892) are B-roll insert photos for this video.
-- **Correction:** "Stop Wasting Food! ... Everblog AI Calender (2).mp4" is NOT
-  unrelated — it's Liz's own earlier edit of this same product (Everblog
-  Calendar fridge tablet), 720p, and she OK'd reusing its clips (2026-10-23).
-  It contains her channel branding: "Egghead Reviews" intro sting (0-10.01s),
-  opener "Hello my fellow eggheads", sign-off "From one egghead to another
-  egghead, this is Liz signing out" (176.8-180.38s on its own shot).
-- `IMG_0895(1).MOV` is a byte-different but stream-identical copy of
-  IMG_0895 (same video+audio MD5 via `-f streamhash`) — ignore it.
-- `RecordIt-1791828181.mp4`: vertical 884x1920 HEVC phone screen recording of
-  the Everblog app, **silent audio track (-91 dB)**. **30-99s shows her Gmail,
-  a readable typed password and a verification code — never use that range.**
-- video1 (2026-10-23) = first rough cut, plan at
-  `_editor/work/video1/plan.json`. Phone block uses SCRATCH VO lifted from
-  the old video; Liz chose to record a real voiceover for it.
-- `extract_audio()` in `transcribe.py` verified against real `IMG_0894.MOV` on the
-  Linux box: ffprobe format duration 32.385s vs decoded-audio duration 32.404s
-  (normal container padding), peak amplitude 0.39 (healthy level, no clipping).
+- **iPhone clips (.MOV)**: 1920x1080 h264, **variable frame rate** (~30fps
+  nominal, fractional avg_frame_rate). render.py's CFR conversion is not
+  optional. Some are tagged rotation=-180 (shot upside down); ffmpeg
+  autorotates them correctly.
+- **iPhone audio has two tracks**: `0:a:0` is normal AAC stereo 48kHz — use
+  this one. `0:a:1` is a 4-channel `apac` spatial-audio track ffprobe can't
+  even name; never feed it to NeMo. Always `-map 0:a:0` explicitly.
+- **Photos are HEIC** (iPhone). See the ffmpeg-on-Windows gotcha below.
+- **Phone screen recordings** (RecordIt, ~884x1920 HEVC, VFR, often a silent
+  audio track): very sparse frames while the screen is static, which breaks
+  naive cuts (see the exact-cuts rule below). They are where personal info
+  and error pop-ups hide.
+- **OneDrive duplicates**: files like `IMG_xxxx(1).MOV` can be byte-different
+  but stream-identical copies — compare with `ffmpeg -f streamhash` before
+  treating one as new footage.
+- **Speech levels vary a lot between setups** (camera distance): measured
+  sources 7-11 dB apart, so use `"voice_level_lufs"` in plans.
+- Older published videos of hers may have music baked in: ask, and give those
+  segments `"music": false` so two songs never play at once (keep any
+  voiceover lifted from them in one continuous piece so the baked music
+  doesn't jump at cuts).
 
 ## Architecture correction: no project timeline, per-clip source time only
 
@@ -110,37 +106,6 @@ YouTube videos. ffmpeg (LGPL/GPL), OpenCV (Apache 2.0), YuNet face model
 watermarking tools, "personal use only" assets, or cloud services. If a
 license needs a credit (OpenMoji CC BY-SA), tell her the credit line.
 
-## render.py picture/look/transition toolkit (added 2026-10-24)
-
-Her request: size, flip, rotate, border, shadow, auto reframe, reverse,
-animation, effects/filters, sharpness, stabilization, colour and light
-enhancement (speed, ducking, audio fades already existed). All in
-render.py's docstring. Verified on her footage in a scratch plan
-(fxtest, deleted after):
-- reverse: first frame matched source's last (diff 1.2 vs 20.4).
-- stabilize (vid.stab two-pass, .trf cached in <work>/stab): on a mildly
-  shaky IMG_0895 clip, jitter 0.40 -> 0.27 px, drift -22%. Modest; expect
-  more on genuinely shaky footage.
-- auto reframe to vertical: face off-centre 0.01-0.04 of frame width vs
-  0.47-0.53 for a centre crop (which cut her off in 32/32 and 15/28
-  frames). Her talking-head framing puts her at x~0.33, so a centre crop is
-  never safe for her Shorts.
-- transitions: output length exactly sum(segments) - overlaps.
-- all 13 filters + enhance checked on one frame side by side.
-Gotchas found building it (all fixed in code):
-- OpenCV 5 dropped Haar cascades (no cv2.CascadeClassifier); face finding
-  uses cv2.FaceDetectorYN + the YuNet onnx in _editor/assets/models.
-- ffmpeg expressions reject a unary minus before "(": write (0-(...)).
-- A frame size that changes per frame (scale eval=frame for "pop")
-  crashes ffmpeg (0xC0000374) or errors downstream: pad back to a fixed
-  canvas right after.
-- "screen" blend in YUV shifts chroma -> everything turns pink. Blend in
-  RGB (format=gbrp).
-- Segments need setsar=1 (one came out 2672:2673) and the xfade join needs
-  every input on the same timebase (settb=AVTB) or concat/xfade refuse.
-- Segment renders run with cwd=<work_dir> so stab/ and luts/ paths are
-  relative (no drive-colon escaping in filter args).
-
 ## Rule: edit out personal information, always (Liz, 2026-10-23)
 
 Her words: "edit out any passwords or emails or address any personal
@@ -155,13 +120,13 @@ and to every edit before it's handed over.
   or mail visible in shots, license plates, and notifications popping up
   on a screen recording. Her first name "Liz" is fine: she says it on camera.
 - **Where it hides:** screen recordings above all (sign-up/login, App Store
-  sheets, settings, notification banners), device screens filmed in
-  footage, paperwork/mail/packages in B-roll, and photos.
+  install sheets, pairing screens, settings, notification banners), device
+  screens filmed in footage, paperwork/mail/packages in B-roll, and photos.
 - **Before rendering:** scan every screen-recording range and on-screen
   device the plan uses with dense frame sheets (1 fps minimum, 10 fps
   around anything suspicious) and read them. Don't assume a range is clean
-  because the obvious part (e.g. login) was skipped -- video1/video2 both
-  shipped an App Store sheet with her email until she spotted it.
+  because the obvious part (e.g. login) was skipped -- an App Store install
+  sheet showing her email once shipped in a cut until she spotted it.
 - **Prefer cutting over blurring.** A cut can't fail; a blur on something
   that moves or animates (sheets sliding in, scrolling) easily misses frames.
   If it must stay visible, blur or box it and check every frame.
@@ -170,29 +135,23 @@ and to every edit before it's handed over.
   -copyts -fps_mode passthrough decode), including faint fade-in/out
   frames, and cut a little outside them. Input -ss/-to alone was NOT frame
   exact on her VFR screen recordings: ffmpeg kept the frame covering the
-  start point and let frames past -to through, leaking an App Store sheet
-  frame and whole pop-ups. render.py's `retime()` now trims on real
-  timestamps for every clip/piece/PiP/B-roll (verified: the leaking piece
-  ended on 5 pop-up frames before, clean after). Still inspect the finished
-  video frame by frame across each join.
+  start point and let frames past -to through, leaking a sheet frame and
+  whole pop-ups. render.py's `retime()` now trims on real timestamps for
+  every clip/piece/PiP/B-roll (verified: a leaking piece ended on 5 pop-up
+  frames before, clean after). Still inspect the finished video frame by
+  frame across each join.
 - Tell her what was found and removed. The raw files still contain it, so
   mention that if she shares raw footage.
-- **Known ranges in current footage** (RecordIt-1791828181.mp4, never use):
-  30-99s login/registration (email, typed password, verification code);
-  20.4-24.2s App Store install sheet (Apple ID email; cut 20.0-24.4);
-  105-112.9s tablet share code being typed (cut 104.0-113.2).
 
 **Also cut app error/warning pop-ups** (Liz, 2026-10-23: "it flashes please
-select a member twice. I would like to edit those pops out"). Treat toasts
-like "Please select a member" as mistakes to hide, not content. Ask before
-assuming neutral ones ("Loading...", "Successfully connected") also go --
-she didn't mention those and they were left in. Known "Please select a
-member" frames in RecordIt: 146.242-147.342, 165.511-166.628,
-180.247-181.330 (cut 146.10-147.45, 165.40-166.70, 180.10-181.42); a PiP
-from 140 ran into the first one, so check PiP/B-roll sources too. Detect
-toasts by the mean brightness of the toast spot (white form ~255, toast
-pulls it under 200) and look at every flagged frame -- the Repeat menu,
-calendar and spinners also trip it.
+select a member twice. I would like to edit those pops out"). Treat error
+toasts like "Please select a member" as mistakes to hide, not content. Ask
+before assuming neutral ones ("Loading...", "Successfully connected") also
+go -- she didn't mention those and they were left in. Check PiP and B-roll
+sources too (a PiP once ran into a pop-up). Detect toasts by the mean
+brightness of the toast spot on a light UI (white form ~255, a toast pulls
+it under 200) and look at every flagged frame -- menus, calendars and
+spinners also trip it.
 
 ## Editorial principle: pick and choose, don't dump everything in
 
@@ -247,96 +206,115 @@ possible if its a youtube video. have it prompt to ask"):
   **Verified visually, not just by exit code**: rendered a zoom on real
   footage, pulled frames at the start/mid/end, confirmed wide -> genuinely
   zoomed-in -> wide, with real hand/body motion visibly continuing at each
-  point (proves it isn't frozen on one frame).
+  point (proves it isn't frozen on one frame). Quick 0.01s punch-ins work
+  well to hide jump cuts on a static talking head.
 
-## render.py: picture-in-picture, fades, music ducking, captions (added 2026-10-23, her call after asking what free features could be added; she picked my suggested order PiP -> fades/music -> captions)
+## render.py: PiP, fades, music, captions, B-roll, levelling (added 2026-10-23)
 
 - `"pip"` on any segment insets another clip (own source start, silent,
   white border, 0.2s alpha fade in/out, holds last frame if the source runs
-  out). video1 uses it twice: phone screen recording on the right while she
-  says "syncs with my phone" (rec 140s) and "the watermelon" (rec 196s). On
-  her fridge shots the tablet sits mid-frame and the right third is empty
-  fridge door, so `"position": "right"` is the default for her.
+  out). Put it where the frame is empty (check a frame first).
 - `"fade_in"`/`"fade_out"` (picture to/from black + audio) and `"volume_db"`
   per segment. Every cut still gets the 20ms anti-click audio fade.
-- Plan-level `"music"` loops a track from `music_dir` under the whole video,
-  ducked by `sidechaincompress` keyed on the voice, 1.5s fade in / 3s fade
-  out. Refused unless `"destination": "youtube"` (see taste log).
+- Plan-level `"music"`: a playlist (`"files"`) from `music_dir`, crossfaded,
+  gain-matched to `level_lufs` from catalog_music's catalog, ducked by
+  `sidechaincompress` keyed on the voice, 1.5s fade in / 3s fade out, starts
+  at the first segment allowing music; per-segment `"music": false` ramps it
+  out for 1s. Refused unless `"destination": "youtube"` (see taste log).
+  Measured: -33 LUFS music sits ~18 dB under her levelled voice; ducking
+  takes it down a further 5-8.5 dB while she talks.
+- `"voice_level_lufs"` levels each segment of 3s+ on its own (cached in
+  `<work>/loudness.json`): speech spread across sections 10 dB -> 1.9 dB.
+  Skips silent tracks (screen recordings) so they aren't boosted ~70 dB.
+- `"broll"` full-frame cutaways (photo push-in or clip; segment audio
+  continues).
 - `"captions": true` burns in short (<=4 word) chunks in Arial Black via an
-  .ass file + `subtitles` filter. Words map onto the output timeline by clip
-  file stem, including block voiceover pieces, so a transcribed vo.wav gets
-  captions automatically. Segment offsets come from the rendered files'
-  real durations, not plan maths, because frame rounding drifts. libass on
-  Windows needs `fontsdir='C\:/Windows/Fonts'`, and ffmpeg runs with cwd =
-  work dir so the .ass path has no drive colon to escape.
+  .ass file + `subtitles` filter (she doesn't want captions -- see taste log).
+  libass on Windows needs `fontsdir='C\:/Windows/Fonts'`, and ffmpeg runs
+  with cwd = work dir so the .ass path has no drive colon to escape.
+  Segment offsets come from the rendered files' real durations, not plan
+  maths, because frame rounding drifts.
 - `"overlays"` (graphics.py ProRes 4444 or PNG+duration) and `"sfx"` per
   segment; `"at"` is clip SOURCE time on clip segments, seconds-in on
-  photo/block segments; out-of-range items warn and skip. Verified: test
-  callout absent at 5.0s, present at 6.5s, gone at 8.7s for at=75.0 on cam
-  69.4-; transparency correct. Sfx verified by subtracting tracks: the only
-  difference sat at 5.45-5.70s (planned 5.4s), rest -73 dB. Test-asset
-  gotcha: ffmpeg `drawbox` doesn't write alpha, so a drawbox in a yuva test
-  graphic comes out invisible -- not a render.py bug.
+  photo/block segments; out-of-range items warn and skip. Verified timing
+  frame by frame and by subtracting audio tracks. Test-asset gotcha: ffmpeg
+  `drawbox` doesn't write alpha, so a drawbox in a yuva test graphic comes
+  out invisible -- not a render.py bug.
 - **graphics.py can't run on the Windows laptop yet**: Node there is v20
   (nvm4w), HyperFrames needs >=22, and no fonts/emoji are fetched. Freesound
   sfx also needs `freesound_api_key` in config.json, not set up.
-- `"voice_cleanup": true` (plan-level; clip opt-out). Measured on IMG_0895:
-  her iPhone audio is already clean (noise floor ~-54 dB), so gains are
-  modest: voice-to-pause gap 29.3 -> 37.8 dB, mostly from the gentle gate.
-  First version with a compressor did nothing (29.2 dB) because makeup gain
-  lifted pauses as much as NR lowered them -- always measure the gap
-  (speech RMS minus pause RMS), not absolute levels, since loudnorm rescales.
-  Enabled in video1. She hasn't listened to it yet.
-- Music ducking verified with a synthetic track by subtracting no-music
-  from music mixes: music -34.4 dB alone, -39 to -43 dB under voice (5-8.5
-  dB duck), 17-21 dB below her voice. Re-tune volume_db with a real track.
-- `--preview`: 960x540, ultrafast, separate render_preview/ dir, and skips
-  loudnorm. Profiling showed loudnorm was 30s of every render (it works at
-  192kHz internally) and the HEVC phone block ~22s; segments themselves are
-  fast. Full render of video1 198s, preview 67s.
-- **video2 additions (2026-10-23)**: `"broll"` full-frame cutaways (photo
-  push-in or clip, segment audio continues), music playlist (`"files"`,
-  crossfaded, gain-matched to `level_lufs` from catalog_music's catalog),
-  per-segment `"music": false` (ramped 1s), and `"voice_level_lufs"`
-  per-segment speech levelling. Measured on video2: speech spread across
-  sections 10 dB -> 1.9 dB; music -33 LUFS sits ~18 dB under her voice.
-- **ffmpeg gotcha (real, caught on video2)**: crossfaded mp3s -> `adelay`
-  (92.7s) -> `apad` -> `atrim` silently lost the delay (music started at 0
-  and ran out ~200s in), though each filter behaves alone and short
-  synthetic tests pass. Fixed by concatenating real anullsrc silence in
-  front. Also: atrim/trim positional args map to start, then `starti` (an
-  alias of start) per `ffmpeg -h filter=atrim`, not start/end -- always
-  write `end=` explicitly. Verify music by subtracting the voice-only
-  joined.mp4 from the preview mix (preview skips loudnorm, so it's exact).
+- `"voice_cleanup": true` (plan-level; clip opt-out). Her iPhone audio is
+  already clean (noise floor ~-54 dB), so gains are modest: voice-to-pause
+  gap 29.3 -> 37.8 dB, mostly from the gentle gate. A first version with a
+  compressor did nothing (29.2 dB) because makeup gain lifted pauses as much
+  as NR lowered them -- always measure the gap (speech RMS minus pause RMS),
+  not absolute levels, since loudnorm rescales. She hasn't given feedback on
+  how it sounds yet.
+- `--preview`: half resolution, ultrafast, separate render_preview/ dir, and
+  skips loudnorm (which was ~30s of every render; it works at 192kHz
+  internally). A 5-min video: full ~3.3 min, preview ~1 min on the laptop.
+- **ffmpeg gotcha (real)**: crossfaded mp3s -> `adelay` (92.7s) -> `apad`
+  -> `atrim` silently lost the delay (music started at 0 and ran out early),
+  though each filter behaves alone and short synthetic tests pass. Fixed by
+  concatenating real anullsrc silence in front. Also: atrim/trim positional
+  args map to start, then `starti` (an alias of start) per
+  `ffmpeg -h filter=atrim`, not start/end -- always write `end=` explicitly.
+  Verify music by subtracting the voice-only joined.mp4 from the preview mix
+  (preview skips loudnorm, so it's exact).
 - Lost once: a `git pull` that reset to a rewritten origin/main wiped this
   work while it was uncommitted, and it was re-merged on top of the
   atempo_chain/zoom version. Commit render.py changes promptly.
 
+## render.py picture/look/transition toolkit (added 2026-10-24)
+
+Her request: size, flip, rotate, border, shadow, auto reframe, reverse,
+animation, effects/filters, sharpness, stabilization, colour and light
+enhancement (speed, ducking, audio fades already existed). All in
+render.py's docstring, plus xfade transitions and vertical/square formats.
+Verified on her footage in a scratch plan:
+- reverse: first frame matched source's last (diff 1.2 vs 20.4).
+- stabilize (vid.stab two-pass, .trf cached in <work>/stab): on a mildly
+  shaky handheld clip, jitter 0.40 -> 0.27 px, drift -22%. Modest; expect
+  more on genuinely shaky footage.
+- auto reframe to vertical: face off-centre 0.01-0.04 of frame width vs
+  0.47-0.53 for a centre crop (which cut her off in 32/32 and 15/28
+  frames). Her talking-head framing puts her at x~0.33, so a centre crop is
+  never safe for her Shorts.
+- transitions: output length exactly sum(segments) - overlaps.
+- all 13 filters + enhance checked on one frame side by side.
+Gotchas found building it (all fixed in code):
+- OpenCV 5 dropped Haar cascades (no cv2.CascadeClassifier); face finding
+  uses cv2.FaceDetectorYN + the YuNet onnx in _editor/assets/models.
+- ffmpeg expressions reject a unary minus before "(": write (0-(...)).
+- A frame size that changes per frame (scale eval=frame for "pop")
+  crashes ffmpeg (0xC0000374) or errors downstream: pad back to a fixed
+  canvas right after.
+- "screen" blend in YUV shifts chroma -> everything turns pink. Blend in
+  RGB (format=gbrp).
+- Segments need setsar=1 (one came out 2672:2673) and the xfade join needs
+  every input on the same timebase (settb=AVTB) or concat/xfade refuse.
+- Segment renders run with cwd=<work_dir> so stab/ and luts/ paths are
+  relative (no drive-colon escaping in filter args).
+
 ## catalog_music.py (new, 2026-10-23, her call: she wants to be able to
 provide a music folder eventually and have the pipeline catalog it)
 
-- Reads `config.json`'s `music_dir` (currently unset -- she'll provide a
-  path later), measures BPM (`librosa.beat.beat_track`), integrated LUFS
-  (`pyloudnorm`), energy swing (90th-10th percentile of short-term RMS in
-  dB -- how much a track swings between quiet/loud sections), brightness
-  (mean spectral centroid, Hz), and vocals via transcribing each track and
-  checking for 50+ words (reuses `transcribe.py`'s functions directly) --
-  matches her original spec for this tool exactly.
+- Reads `config.json`'s `music_dir`, measures BPM (`librosa.beat.beat_track`),
+  integrated LUFS (`pyloudnorm`), energy swing (90th-10th percentile of
+  short-term RMS in dB -- how much a track swings between quiet/loud
+  sections), brightness (mean spectral centroid, Hz), and vocals via
+  transcribing each track and checking for 50+ words (reuses
+  `transcribe.py`'s functions directly) -- matches her original spec for this
+  tool exactly.
 - Writes `<footage_root>/_editor/assets/music/catalog.json` with an
   absolute `source_path` back into `music_dir` -- **never writes into
   music_dir itself**, since that's her own external folder, not ours to
   modify (same boundary as raw footage folders).
-- **Verified for real** (no real music folder exists yet): built a
-  synthetic 120 BPM click track (numpy + soundfile) and ran it through the
-  non-NeMo measurements -- detected 117.5 BPM (normal beat-tracker
-  tolerance, not exact but in the right range), -24.7 LUFS, 436 Hz
-  brightness, all sane real numbers from real signal processing, not
-  placeholders. Vocals detection depends on NeMo like the other
-  NeMo-facing tools -- degrades gracefully (`has_vocals: null` with a note)
-  if NeMo isn't installed/working, rather than crashing the whole catalog
-  run; not yet verified against a real vocal track.
-- `--skip-vocals` flag skips the NeMo step entirely for a fast, GPU-free
-  catalog pass (useful for just getting bpm/LUFS/brightness quickly).
+- Verified on a synthetic 120 BPM click (117.5 BPM detected) and on her real
+  music folder (vocals detection via NeMo works on CPU; all six tracks came
+  back instrumental). Tracks with big energy swings (~14 dB) are distracting
+  under talking; steady ones sit better.
+- `--skip-vocals` flag skips the NeMo step entirely for a fast catalog pass.
 
 ## Tool gotchas (confirmed or carried over from Liz's own prior experience)
 
@@ -389,11 +367,11 @@ provide a music folder eventually and have the pipeline catalog it)
   starting heuristic, not a substitute for actually looking at the
   candidates), overlays bold title text via ffmpeg `drawtext` using a font
   from `fetch_assets.py fonts`, outputs 1280x720 PNGs (YouTube thumbnail
-  spec) to `<work>/thumbnails/`. **Confirmed working for real** against
-  `IMG_0895.MOV`: produced 3 real candidates; visually inspected one —
+  spec) to `<work>/thumbnails/`. **Confirmed working for real** on her
+  footage: produced 3 real candidates; visually inspected one —
   "IS IT WORTH IT?" in bold white Bebas Neue with a black border, clearly
-  legible over a real frame of the Everblog tablet. Not yet in the original
-  11-tool list; this is net-new scope she asked to add.
+  legible over a real frame. Not yet in the original 11-tool list; this is
+  net-new scope she asked to add.
 - **graphics.py** (new, 2026-10-23, her call: "add TitaNet and HyperFrames"):
   renders a callout graphic (icon + bold text, animates in/out) to a
   transparent ProRes 4444 MOV via HyperFrames (HTML+GSAP -> video), for
@@ -430,16 +408,12 @@ provide a music folder eventually and have the pipeline catalog it)
   no attribution) and Freesound (CC0 filter is the safe subset) are
   API-automatable. OpenMoji/Twemoji are open-source bulk packs, not
   per-query search.
-- **Transitions (requested 2026-10-23, not yet built)**: use ffmpeg's built-in
-  `xfade` filter for cut transitions in `render.py` — zero licensing risk
-  since it's a filter, not a downloaded asset. Deliberately steered away from
-  downloaded "transition pack" overlay clips (glitch/light-leak stock
-  footage): those read as wedding/vlog template style, which clashes with the
-  "quirky, fast, informative" DIY-tutorial feel. Default to plain
-  crossfades/cuts via `xfade` unless Liz asks for a specific look. Wire this
-  into `render.py`'s join logic when that tool gets built (it doesn't exist
-  yet).
-
+- **Transitions are built** (xfade, see toolkit above) — a filter, so zero
+  licensing risk. Deliberately steered away from downloaded "transition
+  pack" overlay clips (glitch/light-leak stock footage): those read as
+  wedding/vlog template style, which clashes with the "quirky, fast,
+  informative" DIY-tutorial feel. Default to plain cuts/fades unless Liz asks
+  for a specific look.
 - **ffmpeg on Windows**: `drawtext` segfaults without fontconfig — always pass
   `fontfile='C\:/Windows/Fonts/arial.ttf'`. HEIC stills are tile grids that
   ffmpeg 9 stitches as a stream group, so `-vf` on a HEIC input errors
@@ -447,7 +421,7 @@ provide a music folder eventually and have the pipeline catalog it)
   first (render.py caches them in `<work>/stills`). Windows python can't open
   `/c/...` git-bash paths — use `C:/...`.
 - **loudnorm** single-pass missed -14 by 2.6 LU; render.py does two-pass
-  (lands -14.6, capped by the -1.5 dBTP ceiling).
+  (lands -14.3 to -14.7, capped by the -1.5 dBTP ceiling).
 - Don't read frame rate from `ffprobe -read_intervals` pts — packets come in
   decode order (B-frames), so 30fps looks like 15. Count packets / duration.
 
@@ -465,35 +439,26 @@ provide a music folder eventually and have the pipeline catalog it)
   her rather than guessing. An Amazon cut gets voice/clip audio only.
   render.py enforces it: a plan with `"music"` must also say
   `"destination": "youtube"` or the render stops.
-- **Her older Everblog video has music baked in** (she confirmed,
-  2026-10-23). Any segment from it gets `"music": false` so two songs never
-  play at once; keep its block voiceover in one continuous piece so its
-  baked music doesn't jump at cuts.
-- video2 brief (2026-10-23): ~5 min, "talking throughout and background
-  music". Result 4:55, all talking except the 10s sting and 4.5s of photos.
-  Music: Nico Staf "Sunny Travel" -> Riot "Safety Net" (YouTube Audio
-  Library artists). The four `Track*.mp3` in _music have unknown source --
-  ask her before using them. All six are instrumental (catalog_music).
-- video2 revisions (2026-10-23): she asked to swap the photos of her for
-  others in the folder -> lead-in now IMG_0890 + IMG_0892 (pointing at the
-  fridge screen), pre-sign-off IMG_0882 (smiling, living room, matches the
-  sign-off location); photos held 2.5s. Then "add a few seconds on":
-  sign-off starts at old 172.30 ("It helps plan your life. Really
-  irreplaceable. Super nice.") -> exactly 5:00.
-- New footage IMG_0942.mov: living-room talking head (AI features
-  summary), recorded upside down (rotation=-180, ffmpeg autorotates fine),
-  speech -29.5 LUFS (quiet, camera far away). Two Gemini AI images (receipts
-  pile, grocery bags) used as B-roll for receipt scanning / food.
+- **Music sources**: prefer YouTube Audio Library tracks (named artist files
+  like "Nico Staf - ..." / "Riot - ..." in `_music`). Files with generic
+  names (`Track.mp3`, `Track (1).mp3`...) have unknown provenance — ask her
+  where they came from before using them.
+- She has asked for **"talking throughout and background music"** on a
+  YouTube review: fill the length with her real speech (cutaways, B-roll and
+  PiP for visuals), keep silent stretches to brief photo transitions, and
+  keep music ~15-20 dB under her voice.
 - **No captions** (Liz, 2026-10-23, right after I built burned-in
   captions): "I dont want captions". Keep `"captions"` off in plans; the
   feature stays in render.py, off by default, but don't add it unless she
   asks. No reason given; ask before assuming it also covers title text.
-- She asked for a ~5 min target on video1 (2026-10-23) even though a tight
-  cut was ~4 min; she prefers padding with real content (full-speed screen
-  recording) over cutting short. Unconfirmed whether that's a general rule.
-- Channel branding to keep using: Egghead Reviews sting at the top, "fellow
-  eggheads" greeting, "From one egghead to another egghead" sign-off (all from
-  her earlier Everblog video).
+- When she gives a length target (e.g. ~5 min) and a tight cut comes out
+  shorter, she has preferred padding with real content over cutting short.
+  Unconfirmed whether that's a general rule.
+- Channel branding to keep using: "Egghead Reviews" intro sting at the top,
+  "Hello my fellow eggheads" greeting, "From one egghead to another egghead,
+  this is Liz signing out" sign-off. Right now the sting and sign-off only
+  exist as clips inside one of her older published videos in the footage
+  folder; ask her for standalone copies if a new video needs them.
 - Steer away from flashy downloaded transition packs (glitch/light-leak
   overlays); plain crossfades/cuts fit the DIY-tutorial tone better. Not yet
   directly confirmed by Liz — my own editorial judgment call when she asked
@@ -509,6 +474,6 @@ provide a music folder eventually and have the pipeline catalog it)
   `_editor\tools` on the footage root too (e.g. for use on a totally different
   machine without this git repo cloned).
 - `transcribe(audio=[numpy_array], timestamps=True)` is **confirmed working**
-  (NeMo 3.0.0, CPU, real IMG_0894 run 2026-10-23: 43 words, correct per-clip
-  times). `change_attention_model(...)` for audio over 10 min has still never
-  been run.
+  (NeMo 3.0.0, CPU, real clips 2026-10-23: correct per-clip times).
+  `change_attention_model(...)` for audio over 10 min has still never been
+  run.
