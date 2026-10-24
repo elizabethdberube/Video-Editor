@@ -345,6 +345,12 @@ provide a music folder eventually and have the pipeline catalog it)
 
 ## Editing taste log
 
+- **OpenMoji icons need a credit** (license verified 2026-10-23 on their
+  GitHub: CC BY-SA 4.0, not CC-BY as fetch_assets.py's docstring said --
+  fixed). Any video using one gets this line in its description: "Emoji
+  designed by OpenMoji – the open-source emoji and icon project. License:
+  CC BY-SA 4.0". Tell Liz whenever an edit uses one. Fonts (OFL) and
+  Freesound CC0 sfx need no credit.
 - **Background music: YouTube videos only, never Amazon videos** (Liz's rule,
   2026-10-23). She makes videos for both destinations, so before adding music
   (from `music_dir`) know which one a video is for — if it isn't clear, ask

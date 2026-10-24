@@ -4,7 +4,8 @@
 license/attribution so nothing gets used without knowing its terms.
 
 Subcommands:
-    emoji   Bulk-download the OpenMoji SVG set (CC-BY 4.0, open source,
+    emoji   Bulk-download the OpenMoji SVG set (CC BY-SA 4.0 -- credit
+            OpenMoji in the video description whenever one is used; open source,
             no API key). One-time fetch; searchable by tag afterward.
     sfx     Search and download sound effects from Freesound, restricted
             to CC0 ("no rights reserved") so no attribution is ever owed.
