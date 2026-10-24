@@ -100,6 +100,47 @@ still concatenates clips onto a display timeline, purely for human review —
 editing tools must use the per-clip source time in the JSON, never the SRT's
 times.
 
+## Rule: free tools only, usable in monetized YouTube videos (Liz, 2026-10-24)
+
+"all tools should be free and I should be able to use them for youtube
+videos". Before adding any tool, library, model, font, music, sfx or
+preset: it must be free, and its license must allow use in monetized
+YouTube videos. ffmpeg (LGPL/GPL), OpenCV (Apache 2.0), YuNet face model
+(MIT), Google Fonts (OFL), Freesound CC0 qualify. No paid tiers, trials,
+watermarking tools, "personal use only" assets, or cloud services. If a
+license needs a credit (OpenMoji CC BY-SA), tell her the credit line.
+
+## render.py picture/look/transition toolkit (added 2026-10-24)
+
+Her request: size, flip, rotate, border, shadow, auto reframe, reverse,
+animation, effects/filters, sharpness, stabilization, colour and light
+enhancement (speed, ducking, audio fades already existed). All in
+render.py's docstring. Verified on her footage in a scratch plan
+(fxtest, deleted after):
+- reverse: first frame matched source's last (diff 1.2 vs 20.4).
+- stabilize (vid.stab two-pass, .trf cached in <work>/stab): on a mildly
+  shaky IMG_0895 clip, jitter 0.40 -> 0.27 px, drift -22%. Modest; expect
+  more on genuinely shaky footage.
+- auto reframe to vertical: face off-centre 0.01-0.04 of frame width vs
+  0.47-0.53 for a centre crop (which cut her off in 32/32 and 15/28
+  frames). Her talking-head framing puts her at x~0.33, so a centre crop is
+  never safe for her Shorts.
+- transitions: output length exactly sum(segments) - overlaps.
+- all 13 filters + enhance checked on one frame side by side.
+Gotchas found building it (all fixed in code):
+- OpenCV 5 dropped Haar cascades (no cv2.CascadeClassifier); face finding
+  uses cv2.FaceDetectorYN + the YuNet onnx in _editor/assets/models.
+- ffmpeg expressions reject a unary minus before "(": write (0-(...)).
+- A frame size that changes per frame (scale eval=frame for "pop")
+  crashes ffmpeg (0xC0000374) or errors downstream: pad back to a fixed
+  canvas right after.
+- "screen" blend in YUV shifts chroma -> everything turns pink. Blend in
+  RGB (format=gbrp).
+- Segments need setsar=1 (one came out 2672:2673) and the xfade join needs
+  every input on the same timebase (settb=AVTB) or concat/xfade refuse.
+- Segment renders run with cwd=<work_dir> so stab/ and luts/ paths are
+  relative (no drive-colon escaping in filter args).
+
 ## Rule: edit out personal information, always (Liz, 2026-10-23)
 
 Her words: "edit out any passwords or emails or address any personal
@@ -152,25 +193,6 @@ from 140 ran into the first one, so check PiP/B-roll sources too. Detect
 toasts by the mean brightness of the toast spot (white form ~255, toast
 pulls it under 200) and look at every flagged frame -- the Repeat menu,
 calendar and spinners also trip it.
-
-## Rule: she must not say "tablet" (Liz, 2026-10-23)
-
-Her words: "I'm not suppose to say tablet that needs to be edited out."
-(No reason given -- likely how the brand wants the product described; ask
-before assuming it extends to other words like "iPad" or "screen".)
-
-- Search every transcript word in the plan's kept ranges (clip segments
-  AND block audio pieces) for "tablet" and near-misses ("tab...", "table")
-  before rendering -- Parakeet can mishear it.
-- Cut at a sentence boundary rather than splicing just the word out:
-  IMG_0895 34.4-45.4 "...and then it syncs, [?] right from the tablet, then
-  it syncs with my phone" became end-at-42.50 ("...and then it syncs.") so
-  the next clip "I don't need to actually do anything" follows naturally.
-- Known occurrences: IMG_0895 43.44 (cut), old video 108.0 (not used).
-- **Verify on the finished file**: transcribe the rendered mp4 and search
-  it -- that checks what viewers actually hear. Done for video1 + video2
-  (no hits).
-- Products shown on screen are fine; the rule is about her speech.
 
 ## Editorial principle: pick and choose, don't dump everything in
 

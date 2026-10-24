@@ -80,6 +80,26 @@ tied to a moment.
 - burned-in captions (`"captions": true`) built from the transcript. Off
   by default, and not used on this channel's videos.
 
+It can also change the picture, look and joins (full option list in
+`render.py`'s docstring):
+
+- **size and position** of the picture as a card, with **border**, **drop
+  shadow**, **tilt** and **slide/pop/fade animations** in and out
+- **flip**, **rotate** (sideways footage or any tilt angle), **reverse**
+- **video stabilization** for shaky handheld shots
+- **auto reframe**: crop follows your face, mainly for vertical Shorts
+  (`"format": "vertical"`; square works too)
+- **colour and light enhancement** (one-switch auto fix, or brightness,
+  contrast, saturation, warmth, shadows/highlights, LUTs) and **sharpness**
+- **filters**: black & white, sepia, vintage, vignette, blur, grain,
+  invert, warm, cool, vivid, cinematic, letterbox, glow
+- **transitions** between clips: fade, dissolve, wipes, slides, zoom and more
+- **photo motion**: push in, pull out, pan left/right/up/down
+
+Every tool used is free and fine for monetized YouTube videos (ffmpeg,
+OpenCV, and OpenCV's MIT-licensed YuNet face model, which auto reframe needs
+in `_editor/assets/models/face_detection_yunet_2023mar.onnx`).
+
 **Quick preview:** `python tools/render.py --name video1 --preview` renders
 a small 960×540 copy (`video1_preview.mp4`) about 3× faster than a full
 render (about 1 minute vs about 3½ for a 5-minute video on the Windows

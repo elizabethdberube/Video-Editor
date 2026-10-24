@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Render an edit plan (plan.json) into a finished 1920x1080 30fps CFR video.
+"""Render an edit plan (plan.json) into a finished 30fps CFR video (1920x1080
+by default; vertical and square formats too).
+
+Everything here is free to use in monetized YouTube videos: ffmpeg
+(LGPL/GPL), OpenCV (Apache 2.0) and the YuNet face model (MIT) put no
+conditions on the videos made with them, and nothing calls a paid service.
 
 Every time in the plan is a per-clip source time (0 at that file's start),
 never a project-timeline time -- see transcribe.py. The plan is a list of
@@ -44,12 +49,52 @@ Any segment can also take:
     "music": false
         Keep the background music silent during this segment (it ramps out
         and back in around it) -- e.g. clips that already have music baked in.
+
+  Picture:
+    "flip": "horizontal" | "vertical" | "both"
+    "rotate": 90 | 180 | 270 (turns the source, e.g. sideways phone footage)
+              or any other angle (tilts the frame, zoomed so no corners show)
+    "stabilize": true | {"shakiness": 5, "smoothing": 15}   (clip segments)
+        Two-pass vid.stab; the motion analysis is cached in <work_dir>/stab.
+    "reverse": true      (clip segments, up to 30s; audio plays backwards too)
+    "reframe": "auto" | 0-1   (clip segments with the default "fill" layout)
+        Crop to fill the frame following the largest face (OpenCV YuNet,
+        cached in <work_dir>/reframe.json), or at a fixed horizontal
+        position. Mostly for landscape footage in a vertical Short.
+    "transform": {"scale": 0.75, "x": 0.5, "y": 0.5, "rotate": -4,
+                  "border": {"width": 12, "color": "white"},
+                  "shadow": true | {"blur": 18, "opacity": 0.55, "offset": 16},
+                  "background": "blur" | "black" | "#1d3557",
+                  "enter": "slide_left|slide_right|slide_up|slide_down|pop|fade",
+                  "exit": same names, "anim": 0.4}
+        Shrink the picture into a card over a background, with border,
+        drop shadow, tilt and an animated entrance/exit.
+    "motion" (photos): "push_in" (default) | "pull_out" | "pan_left" |
+        "pan_right" | "pan_up" | "pan_down" | "none"
+  Look (applied to the footage, B-roll and PiP -- never to graphics):
+    "enhance": true        auto light/colour fix (contrast, white balance, vibrance, light sharpen)
+    "color": {"brightness": 0.03, "contrast": 1.1, "saturation": 1.2, "gamma": 1.0,
+              "vibrance": 0.2, "temperature": 5500, "shadows": 0.5, "highlights": -0.3,
+              "lut": "film.cube"}     (LUT files go in <work_dir>/luts)
+    "sharpen": 0.5-1.5
+    "filters": ["bw", "sepia", "vintage", "vignette", "blur", "grain", "invert",
+                "warm", "cool", "vivid", "cinematic", "letterbox", "glow"]
+  Joins:
+    "transition": {"type": "fade", "duration": 0.5}
+        Into this segment from the previous one (they overlap by the
+        duration). Types: fade, dissolve, fadeblack, fadewhite, wipeleft/
+        right/up/down, slideleft/right/up/down, smoothleft/right, circleopen/
+        close, radial, zoomin, pixelize, hblur, distance. Any transition makes
+        the join a re-encode instead of a stream copy.
     For overlays, sfx and broll, "at" on a clip segment is that clip's SOURCE time
     (so re-trimming the segment doesn't move the graphic off its moment);
     on a photo or block it's seconds into the segment. Anything that would
     start outside the segment is skipped with a warning.
 
 Plan-level options:
+    "format": "landscape" (1920x1080, default) | "vertical" (1080x1920, Shorts) | "square" (1080x1080)
+    "defaults": {"enhance": true, ...}
+        Settings applied to every segment unless the segment sets its own.
     "destination": "youtube" | "amazon"   -- required if "music" is set.
     "music": {"files": ["a.mp3", "b.mp3"], "level_lufs": -30, "crossfade": 2}
         A playlist under the video, crossfaded track to track and repeated
@@ -255,6 +300,267 @@ def zoom_filter(zoom: dict, dur: float, src: str, out: str) -> str:
     return f"[{src}]zoompan=z='{z}':x='{x}':y='{y}':d=1:s={W}x{H}:fps={FPS}[{out}]"
 
 
+# --- picture tools (flip/rotate/stabilize/reverse/reframe/transform/looks) ---
+
+def even(x: float) -> int:
+    return max(2, int(round(x / 2)) * 2)
+
+
+def orient_filter(seg) -> str:
+    """Flip and 90-degree rotation, applied to the source before layout so a
+    sideways clip is reframed correctly. Returns ',filter,...' or ''."""
+    f = []
+    turn = {90: "transpose=clock", 180: "transpose=clock,transpose=clock",
+            270: "transpose=cclock", -90: "transpose=cclock"}.get(seg.get("rotate"))
+    if turn:
+        f.append(turn)
+    f += {"horizontal": ["hflip"], "vertical": ["vflip"], "both": ["hflip", "vflip"]}.get(seg.get("flip"), [])
+    return "".join("," + x for x in f)
+
+
+def tilt_filter(angle: float) -> str:
+    """Rotate the whole frame by any angle, zoomed just enough that no black
+    corners show."""
+    import math
+    a = math.radians(angle)
+    k = abs(math.cos(a)) + abs(math.sin(a)) * max(W / H, H / W)
+    return f"scale={even(W * k)}:{even(H * k)},rotate={a:.5f}:ow={W}:oh={H}"
+
+
+def stab_file(seg, clips, root, wd) -> str:
+    """Pass 1 of stabilisation: run vidstabdetect over exactly the frames the
+    segment will use (same seek + retime chain, so frame numbers line up) and
+    cache the motion file. Returns its path relative to the work dir, where
+    segment renders run (avoids escaping the drive colon in the filter)."""
+    c = clips[seg["clip"]]
+    opts = seg["stabilize"] if isinstance(seg["stabilize"], dict) else {}
+    span, speed = seg["end"] - seg["start"], seg.get("speed", 1.0)
+    rel = (f"stab/{Path(c['file']).stem}_{seg['start']:.2f}_{seg['end']:.2f}_{speed}"
+           f"_{opts.get('shakiness', 5)}.trf")
+    if not (wd / rel).exists():
+        (wd / "stab").mkdir(exist_ok=True)
+        run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-ss", f"{seg['start']:.3f}", "-to", f"{seg['end']:.3f}",
+             "-i", str(root / c["file"]), "-vf",
+             f"{retime(span, speed)},vidstabdetect=shakiness={opts.get('shakiness', 5)}:accuracy=15:result={rel}",
+             "-f", "null", "-"], cwd=wd)
+    return rel
+
+
+def stab_filter(seg, rel) -> str:
+    opts = seg["stabilize"] if isinstance(seg["stabilize"], dict) else {}
+    return (f",vidstabtransform=input={rel}:smoothing={opts.get('smoothing', 15)}:"
+            f"zoom=0:optzoom=1:interpol=bicubic")
+
+
+FACE_MODEL = "face_detection_yunet_2023mar.onnx"  # OpenCV zoo YuNet (MIT), in _editor/assets/models
+
+
+def face_track(path: Path, start: float, end: float, wd: Path, rate=5) -> list:
+    """Horizontal face position (0-1) over a clip range, sampled `rate` times
+    a second, smoothed, cached in <work_dir>/reframe.json. OpenCV 5 dropped
+    the Haar cascades, so this uses its YuNet detector. Frames with no face
+    hold the last known position (0.5 until one is found)."""
+    import cv2
+    import numpy as np
+    cache_file = wd / "reframe.json"
+    cache = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.exists() else {}
+    key = f"{path.name}|{start:.3f}|{end:.3f}|{rate}"
+    if key in cache:
+        return cache[key]
+    model = assets_dir("models") / FACE_MODEL
+    if not model.exists():
+        sys.exit(f"auto reframe needs {model} (OpenCV zoo face_detection_yunet_2023mar.onnx)")
+    w, h = 640, 360
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", str(path),
+                          "-vf", f"fps={rate},scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+                         stdout=subprocess.PIPE).stdout
+    frames = np.frombuffer(raw, dtype=np.uint8).reshape(-1, h, w, 3)
+    det = cv2.FaceDetectorYN.create(str(model), "", (w, h))
+    xs, last = [], None
+    for f in frames:
+        _, faces = det.detect(f)
+        if faces is not None and len(faces):
+            big = max(faces, key=lambda r: r[2] * r[3])
+            last = float((big[0] + big[2] / 2) / w)
+        xs.append(last)
+    first = next((x for x in xs if x is not None), 0.5)
+    xs = [first if x is None else x for x in xs]
+    # median then exponential smoothing: no jitter, no snapping between faces
+    med = [float(np.median(xs[max(0, i - 3):i + 4])) for i in range(len(xs))]
+    out, s = [], med[0] if med else 0.5
+    for x in med:
+        s += 0.25 * (x - s)
+        out.append(round(s, 4))
+    cache[key] = out
+    cache_file.write_text(json.dumps(cache), encoding="utf-8")
+    return out
+
+
+def reframe_filter(seg, c, root, wd, src: str, out: str) -> str:
+    """Fill the frame by cropping, steering the crop to follow a face
+    ("reframe": "auto") or holding a fixed horizontal position (0-1). Used
+    when the source is wider than the output, e.g. landscape footage in a
+    vertical Short."""
+    speed = seg.get("speed", 1.0)
+    cover = f"scale={W}:{H}:force_original_aspect_ratio=increase"
+    if seg["reframe"] == "auto":
+        rate = 5
+        xs = face_track(root / c["file"], seg["start"], seg["end"], wd, rate)
+        keys = [(i / rate / speed, x) for i, x in enumerate(xs)][::2]  # every 0.4s of source
+        if not keys:
+            keys = [(0.0, 0.5)]
+        terms = []
+        for (t0, x0), (t1, x1) in zip(keys, keys[1:]):
+            slope = (x1 - x0) / (t1 - t0)
+            terms.append(f"gte(t,{t0:.3f})*lt(t,{t1:.3f})*({x0:.4f}+{slope:.5f}*(t-{t0:.3f}))")
+        terms.append(f"gte(t,{keys[-1][0]:.3f})*{keys[-1][1]:.4f}")
+        cx = "+".join(terms)
+    else:
+        cx = f"{float(seg['reframe']):.4f}"
+    return (f"[{src}]{cover},crop={W}:{H}:x='min(max(({cx})*iw-{W}/2,0),iw-{W})':y='(ih-{H})/2',"
+            f"setsar=1[{out}]")
+
+
+EASE_OUT = "(1-pow(1-min(1,max(0,t/{d})),3))"            # 0 -> 1 over the first d seconds
+EASE_EXIT = "pow(min(1,max(0,(t-{s})/{d})),3)"            # 0 -> 1 over the last d seconds
+
+
+def transform_graph(tf: dict, dur: float, src: str, out: str) -> str:
+    """Shrink the picture into a card on a background, with optional border,
+    drop shadow, tilt and slide/pop/fade entrance and exit."""
+    s = tf.get("scale", 0.8)
+    cx, cy = tf.get("x", 0.5), tf.get("y", 0.5)
+    fw, fh = even(W * s), even(H * s)
+    bw = tf.get("border", {}).get("width", 0) if isinstance(tf.get("border"), dict) else (12 if tf.get("border") else 0)
+    bcol = tf.get("border", {}).get("color", "white") if isinstance(tf.get("border"), dict) else "white"
+    d = tf.get("anim", 0.4)
+    enter, exit_ = tf.get("enter"), tf.get("exit")
+    bg = tf.get("background", "blur")
+
+    g = f"[{src}]split[tfb][tff];"
+    if bg == "blur":
+        g += f"[tfb]boxblur=30:2,eq=brightness=-0.1[tbg];"
+    else:
+        g += f"[tfb]drawbox=c={bg}:t=fill[tbg];"
+    g += f"[tff]scale={fw}:{fh},setsar=1"
+    if bw:
+        g += f",pad=iw+{2 * bw}:ih+{2 * bw}:{bw}:{bw}:{bcol}"
+    g += ",format=rgba"
+    if tf.get("rotate"):
+        import math
+        a = math.radians(tf["rotate"])
+        g += f",rotate={a:.5f}:ow=rotw({a:.5f}):oh=roth({a:.5f}):c=none"
+    if enter == "fade":
+        g += f",fade=t=in:d={d}:alpha=1"
+    if exit_ == "fade":
+        g += f",fade=t=out:st={dur - d:.3f}:d={d}:alpha=1"
+    if enter == "pop":
+        # Scale inside a fixed transparent canvas: frames whose size changes
+        # every frame crash/stop the pad, blur and overlay filters after this.
+        import math
+        cw, ch = fw + 2 * bw, fh + 2 * bw
+        if tf.get("rotate"):
+            a = abs(math.radians(tf["rotate"]))
+            cw, ch = cw * math.cos(a) + ch * math.sin(a), cw * math.sin(a) + ch * math.cos(a)
+        cw, ch = even(cw + 2), even(ch + 2)
+        g += (f",scale=w='max(4,trunc(iw*(0.2+0.8*{EASE_OUT.format(d=d)})/2)*2)':h=-2:eval=frame,"
+              f"pad=w={cw}:h={ch}:x=(ow-iw)/2:y=(oh-ih)/2:color=black@0:eval=frame")
+    g += "[tcard];"
+
+    # Slide offsets, added to the resting position.
+    # ffmpeg's expression parser rejects a unary minus before "(", hence (0-(...)).
+    reach = {"slide_left": ("(0-(X+w))", "0"), "slide_right": ("(W-X)", "0"),
+             "slide_down": ("0", "(0-(Y+h))"), "slide_up": ("0", "(H-Y)")}
+    X, Y = f"({W * cx:.1f}-w/2)", f"({H * cy:.1f}-h/2)"
+
+    def offset(axis):
+        parts = []
+        if enter in reach:
+            parts.append(f"{reach[enter][axis]}*(1-{EASE_OUT.format(d=d)})")
+        if exit_ in reach:
+            # exits leave the way the same-named entrance arrives from
+            parts.append(f"{reach[exit_][axis]}*{EASE_EXIT.format(s=f'{dur - d:.3f}', d=d)}")
+        return "+".join(parts) or "0"
+    # X/Y inside the slide offsets mean the card's resting position; W/H/w/h
+    # are overlay's own main/overlay sizes.
+    xexpr = f"{X}+{offset(0)}".replace("(X+", f"({X}+").replace("-X)", f"-{X})")
+    yexpr = f"{Y}+{offset(1)}".replace("(Y+", f"({Y}+").replace("-Y)", f"-{Y})")
+
+    shadow = tf.get("shadow")
+    if shadow:
+        sh = shadow if isinstance(shadow, dict) else {}
+        blur, op, off = sh.get("blur", 18), sh.get("opacity", 0.55), sh.get("offset", 16)
+        m = blur * 3
+        g += (f"[tcard]split[tc1][tc2];"
+              f"[tc2]pad=iw+{2 * m}:ih+{2 * m}:{m}:{m}:color=black@0,"
+              f"colorchannelmixer=rr=0:gg=0:bb=0:aa={op},gblur=sigma={blur}[tsh];"
+              # the shadow is padded evenly, so centring it like the card lines them up
+              f"[tbg][tsh]overlay=x='{xexpr}+{off}':y='{yexpr}+{off}':eval=frame[tbg2];"
+              f"[tbg2][tc1]overlay=x='{xexpr}':y='{yexpr}':eval=frame,setsar=1[{out}]")
+    else:
+        g += f"[tbg][tcard]overlay=x='{xexpr}':y='{yexpr}':eval=frame,setsar=1[{out}]"
+    return g
+
+
+LOOKS = {
+    "bw": "hue=s=0",
+    "sepia": "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131",
+    "vintage": "curves=preset=vintage,vignette=angle=PI/5",
+    "vignette": "vignette=angle=PI/4.5",
+    "blur": "gblur=sigma=12",
+    "grain": "noise=alls=10:allf=t+u",
+    "invert": "negate",
+    "warm": "colortemperature=temperature=4800",
+    "cool": "colortemperature=temperature=8000",
+    "vivid": "eq=contrast=1.1:saturation=1.35",
+    "cinematic": "colorbalance=rs=-0.05:bs=0.07:rh=0.07:gh=0.02:bh=-0.06,eq=contrast=1.08:saturation=1.1",
+    "letterbox": "drawbox=x=0:y=0:w=iw:h=ih*0.11:c=black:t=fill,drawbox=x=0:y=ih*0.89:w=iw:h=ih*0.11:c=black:t=fill",
+    "glow": None,  # needs a split, built in look_graph
+}
+# Auto light/colour fix: gentle contrast stretch and white balance from the
+# picture itself (normalize, smoothed over ~1s so it doesn't pump), a touch
+# of vibrance and a light sharpen.
+ENHANCE = "normalize=blackpt=black:whitept=white:smoothing=30:independence=0.6:strength=0.7,vibrance=intensity=0.12,unsharp=5:5:0.4"
+
+
+def look_graph(seg, src: str, out: str) -> str:
+    """Colour/light, sharpness and named looks, in that order."""
+    f = []
+    if seg.get("enhance"):
+        f.append(ENHANCE)
+    col = seg.get("color", {})
+    eq = {k: col[k] for k in ("brightness", "contrast", "saturation", "gamma") if k in col}
+    if eq:
+        f.append("eq=" + ":".join(f"{k}={v}" for k, v in eq.items()))
+    if "vibrance" in col:
+        f.append(f"vibrance=intensity={col['vibrance']}")
+    if "temperature" in col:
+        f.append(f"colortemperature=temperature={col['temperature']}")
+    if "shadows" in col or "highlights" in col:
+        sh, hl = col.get("shadows", 0), col.get("highlights", 0)
+        f.append(f"curves=all='0/0 0.25/{0.25 + 0.12 * sh:.3f} 0.75/{0.75 + 0.12 * hl:.3f} 1/1'")
+    if "lut" in col:
+        f.append(f"lut3d=luts/{col['lut']}")  # .cube files in <work_dir>/luts (renders run there)
+    if seg.get("sharpen"):
+        f.append(f"unsharp=5:5:{seg['sharpen']}:5:5:0")
+    names = seg.get("filters", [])
+    unknown = [n for n in names if n not in LOOKS]
+    if unknown:
+        sys.exit(f"unknown filter(s) {unknown}; available: {sorted(LOOKS)}")
+    chain = ",".join(f + [LOOKS[n] for n in names if LOOKS[n]]) or "null"
+    g = f"[{src}]{chain}"
+    if "glow" in names:
+        g += (f"[lk0];[lk0]format=gbrp,split[lk1][lk2];[lk2]gblur=sigma=20[lk3];"  # blend in RGB: in YUV, screen on the chroma planes turns everything pink
+              f"[lk1][lk3]blend=all_mode=screen:all_opacity=0.35,format=yuv420p[{out}]")
+    else:
+        g += f"[{out}]"
+    return g
+
+
+def has_look(seg) -> bool:
+    return any(k in seg for k in ("enhance", "color", "sharpen", "filters"))
+
+
 def segment_duration(seg) -> float:
     if "photo" in seg:
         return seg["duration"]
@@ -282,22 +588,37 @@ def retime(span: float, speed: float) -> str:
     return f"trim=start=0:end={span:.3f},setpts=PTS/{speed},fps={FPS}:start_time=0"
 
 
-def clip_graph(seg, clips, root, cmd, dur, cleanup):
+MAX_REVERSE = 30.0  # reverse holds every frame in memory
+
+
+def clip_graph(seg, clips, root, wd, cmd, dur, cleanup):
     c = clips[seg["clip"]]
     path = root / c["file"]
     speed = seg.get("speed", 1.0)
     track = c.get("audio_track", 0)
     i = n_inputs(cmd)
     cmd += ["-ss", f"{seg['start']:.3f}", "-to", f"{seg['end']:.3f}", "-i", str(path)]
-    fc = (f"[{i}:v]{retime(seg['end'] - seg['start'], speed)}[v0];"
-          + layout_filter(c.get("layout", "fill"), "v0", "v1"))
+    pre = ""
+    if seg.get("stabilize"):
+        pre += stab_filter(seg, stab_file(seg, clips, root, wd))
+    reverse = seg.get("reverse")
+    if reverse and dur > MAX_REVERSE:
+        sys.exit(f"reverse on {seg_label(seg)}: {dur:.1f}s is too long (max {MAX_REVERSE}s, it buffers every frame)")
+    if reverse:
+        pre += ",reverse"
+    pre += orient_filter(seg)
+    fc = f"[{i}:v]{retime(seg['end'] - seg['start'], speed)}{pre}[v0];"
+    if seg.get("reframe") is not None and c.get("layout", "fill") == "fill":
+        fc += reframe_filter(seg, c, root, wd, "v0", "v1")
+    else:
+        fc += layout_filter(c.get("layout", "fill"), "v0", "v1")
     if "zoom" in seg:
         fc += ";" + zoom_filter(seg["zoom"], dur, "v1", "vb")
     else:
         fc += ";[v1]null[vb]"
     if has_audio(path, track):
         fc += (f";[{i}:a:{track}]{voice_chain(c, cleanup, seg.get('_level_db'))}{atempo_chain(speed)},"
-               f"apad,atrim=end={dur:.3f}[ab]")
+               f"apad,atrim=end={dur:.3f}{',areverse' if reverse else ''}[ab]")
     else:
         fc += ";" + silence(cmd, dur)
     return fc
@@ -316,13 +637,28 @@ def still_png(name: str, root: Path, wd: Path) -> Path:
     return png
 
 
+PHOTO_MOTION = {  # zoompan z / x / y per "motion"; N = total frames
+    "push_in":  ("1+0.06*on/N", "iw/2-iw/zoom/2", "ih/2-ih/zoom/2"),
+    "pull_out": ("1.06-0.06*on/N", "iw/2-iw/zoom/2", "ih/2-ih/zoom/2"),
+    "pan_left":  ("1.12", "(iw-iw/zoom)*(1-on/N)", "ih/2-ih/zoom/2"),
+    "pan_right": ("1.12", "(iw-iw/zoom)*on/N", "ih/2-ih/zoom/2"),
+    "pan_up":    ("1.12", "iw/2-iw/zoom/2", "(ih-ih/zoom)*(1-on/N)"),
+    "pan_down":  ("1.12", "iw/2-iw/zoom/2", "(ih-ih/zoom)*on/N"),
+    "none":      ("1", "0", "0"),
+}
+
+
 def photo_graph(seg, root, wd, cmd, dur):
     frames = round(dur * FPS)
     i = n_inputs(cmd)
     cmd += ["-i", str(still_png(seg["photo"], root, wd))]
-    fc = (f"[{i}:v]scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,crop={W * 2}:{H * 2},"
-          f"zoompan=z='1+0.06*on/{frames}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':"
-          f"d={frames}:s={W}x{H}:fps={FPS},setsar=1[vb]")
+    motion = seg.get("motion", "push_in")
+    if motion not in PHOTO_MOTION:
+        sys.exit(f"unknown photo motion {motion!r}; available: {sorted(PHOTO_MOTION)}")
+    z, x, y = (e.replace("N", str(frames)) for e in PHOTO_MOTION[motion])
+    fc = (f"[{i}:v]{orient_filter(seg)[1:] + ',' if orient_filter(seg) else ''}"
+          f"scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,crop={W * 2}:{H * 2},"
+          f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={W}x{H}:fps={FPS},setsar=1[vb]")
     return fc + ";" + silence(cmd, dur)
 
 
@@ -336,7 +672,7 @@ def block_graph(seg, clips, root, wd, cmd, dur, cleanup):
         cmd += ["-ss", f"{piece['start']:.3f}", "-to", f"{piece['end']:.3f}", "-i", str(root / c["file"])]
         parts.append(f"[{i}:v]{retime(piece['end'] - piece['start'], speed)},setsar=1[p{k}]")
         labels.append(f"[p{k}]")
-    fc = ";".join(parts) + ";" + "".join(labels) + f"concat=n={len(labels)}:v=1:a=0[cat];"
+    fc = ";".join(parts) + ";" + "".join(labels) + f"concat=n={len(labels)}:v=1:a=0{orient_filter(seg)}[cat];"
     fc += layout_filter(layout, "cat", "vb")
 
     # Silent bed for the whole block, then every audio piece mixed in at its offset.
@@ -466,19 +802,37 @@ def render_segment(seg, clips, root, wd, out: Path, cleanup: bool, sfx_dir: Path
     elif "block" in seg:
         fc = block_graph(seg, clips, root, wd, cmd, dur, cleanup)
     else:
-        fc = clip_graph(seg, clips, root, cmd, dur, cleanup)
+        fc = clip_graph(seg, clips, root, wd, cmd, dur, cleanup)
 
-    # Layers, bottom to top: segment picture, B-roll cutaways, PiP, graphics.
-    bfc, vlabel = broll_graph(seg, clips, root, wd, cmd, dur, "vb")
+    # Layers, bottom to top: segment picture (tilted / shrunk into a card),
+    # B-roll cutaways, PiP, then the colour look over all footage, then
+    # graphics on top so the look never tints them.
+    vlabel = "vb"
+    angle = seg.get("rotate")
+    if angle and angle not in (90, 180, 270, -90) and "transform" not in seg:
+        fc += f";[{vlabel}]{tilt_filter(angle)}[vt]"
+        vlabel = "vt"
+    if "transform" in seg:
+        tf = dict(seg["transform"])
+        if angle and angle not in (90, 180, 270, -90):
+            tf.setdefault("rotate", angle)
+        fc += ";" + transform_graph(tf, dur, vlabel, "vtf")
+        vlabel = "vtf"
+    bfc, vlabel = broll_graph(seg, clips, root, wd, cmd, dur, vlabel)
     fc += bfc
     if "pip" in seg:
         fc += pip_graph(seg["pip"], clips, root, cmd, dur, vlabel)
         vlabel = "vp"
+    if has_look(seg):
+        fc += ";" + look_graph(seg, vlabel, "vlk")
+        vlabel = "vlk"
     ofc, vlabel = overlays_graph(seg, wd, cmd, dur, vlabel)
     fc += ofc
 
     fin, fout = seg.get("fade_in", 0), seg.get("fade_out", 0)
-    vf = ["format=yuv420p"]
+    # Square pixels on every segment: a flip/look segment came out 2672:2673,
+    # which the transition join's concat refuses.
+    vf = ["format=yuv420p", "setsar=1"]
     if fin:
         vf.append(f"fade=t=in:d={fin}")
     if fout:
@@ -495,7 +849,7 @@ def render_segment(seg, clips, root, wd, out: Path, cleanup: bool, sfx_dir: Path
     fc += (f";[{alabel}]afade=t=in:d={max(fin, FADE)},"
            f"afade=t=out:st={dur - max(fout, FADE):.3f}:d={max(fout, FADE)}[a]")
     run(cmd + ["-filter_complex", fc, "-map", "[v]", "-map", "[a]", "-t", f"{dur:.3f}",
-               *VIDEO_OUT, *AUDIO_OUT, str(out)])
+               *VIDEO_OUT, *AUDIO_OUT, str(out)], cwd=wd)
 
 
 def seg_label(seg) -> str:
@@ -691,6 +1045,58 @@ def finalise(plan, cfg, joined: Path, wd: Path, final: Path, captions: Path | No
         cwd=wd)
 
 
+FORMATS = {"landscape": (1920, 1080), "vertical": (1080, 1920), "square": (1080, 1080)}
+XFADES = {"fade", "dissolve", "fadeblack", "fadewhite", "wipeleft", "wiperight", "wipeup", "wipedown",
+          "slideleft", "slideright", "slideup", "slidedown", "circleopen", "circleclose", "radial",
+          "smoothleft", "smoothright", "zoomin", "pixelize", "hblur", "distance"}
+
+
+def join_segments(seg_files, segs, rdir: Path):
+    """Join the rendered segments. Hard cuts are a stream copy; when any
+    segment has a "transition" the join is re-encoded with xfade (video) and
+    acrossfade (audio), which overlaps the two segments by its duration.
+    Returns (joined path, [(start, end) per segment on the output timeline])."""
+    lens = [probe_duration(f) for f in seg_files]
+    joined = rdir / "joined.mp4"
+    if not any(s.get("transition") for s in segs[1:]):
+        listing = rdir / "concat.txt"
+        listing.write_text("".join(f"file '{p.as_posix()}'\n" for p in seg_files), encoding="utf-8")
+        run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+             "-i", str(listing), "-c", "copy", str(joined)])
+        spans, t = [], 0.0
+        for d in lens:
+            spans.append((t, t + d))
+            t += d
+        return joined, spans
+
+    cmd = ["ffmpeg", "-nostdin", "-y", "-v", "error"]
+    for f in seg_files:
+        cmd += ["-i", str(f)]
+    fc = [f"[{k}:v]setsar=1,format=yuv420p,fps={FPS},settb=AVTB[sv{k}]" for k in range(len(seg_files))]
+    v, a, total = "sv0", "0:a", lens[0]
+    spans = [(0.0, lens[0])]
+    for k in range(1, len(seg_files)):
+        tr = segs[k].get("transition")
+        if tr:
+            kind = tr.get("type", "fade") if isinstance(tr, dict) else "fade"
+            d = min(tr.get("duration", 0.5) if isinstance(tr, dict) else 0.5, lens[k - 1] / 2, lens[k] / 2)
+            if kind not in XFADES:
+                sys.exit(f"unknown transition {kind!r}; available: {sorted(XFADES)}")
+            off = total - d
+            fc.append(f"[{v}][sv{k}]xfade=transition={kind}:duration={d:.3f}:offset={off:.3f}[xv{k}]")
+            fc.append(f"[{a}][{k}:a]acrossfade=d={d:.3f}:c1=tri:c2=tri[xa{k}]")
+            spans.append((off, off + lens[k]))
+            total += lens[k] - d
+        else:
+            fc.append(f"[{v}][{a}][sv{k}][{k}:a]concat=n=2:v=1:a=1[xv{k}][xa{k}]")
+            spans.append((total, total + lens[k]))
+            total += lens[k]
+        v, a = f"xv{k}", f"xa{k}"
+    run(cmd + ["-filter_complex", ";".join(fc), "-map", f"[{v}]", "-map", f"[{a}]",
+               *VIDEO_OUT, *AUDIO_OUT, str(joined)])
+    return joined, spans
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True, help="video name (work dir under footage_root/_editor/work)")
@@ -701,16 +1107,24 @@ def main():
                     help="fast 960x540 review render into render_preview/, output <name>_preview.mp4")
     args = ap.parse_args()
 
-    global W, H, VIDEO_OUT, PIP_MARGIN
-    if args.preview:
-        W, H, PIP_MARGIN = 960, 540, 20
-        VIDEO_OUT = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                     "-pix_fmt", "yuv420p", "-r", str(FPS)]
-
     cfg = load()
     root = cfg["footage_root"]
     wd = work_dir(args.name)
     plan = json.loads((wd / args.plan).read_text(encoding="utf-8"))
+
+    global W, H, VIDEO_OUT, PIP_MARGIN
+    fmt = plan.get("format", "landscape")
+    if fmt not in FORMATS:
+        sys.exit(f"unknown format {fmt!r}; available: {sorted(FORMATS)}")
+    W, H = FORMATS[fmt]
+    if args.preview:
+        W, H, PIP_MARGIN = W // 2, H // 2, 20
+        VIDEO_OUT = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                     "-pix_fmt", "yuv420p", "-r", str(FPS)]
+    # Plan-wide defaults (e.g. {"enhance": true}); a segment's own keys win.
+    for seg in plan["segments"]:
+        for k, v in plan.get("defaults", {}).items():
+            seg.setdefault(k, v)
     if plan.get("music") and plan.get("destination") != "youtube":
         sys.exit(f"plan has music but destination is {plan.get('destination')!r}: background music "
                  f"is only for YouTube videos, never Amazon. Set \"destination\": \"youtube\" or drop \"music\".")
@@ -731,19 +1145,11 @@ def main():
         print(f"[{i + 1}/{len(plan['segments'])}] {seg_label(seg)}", file=sys.stderr)
         render_segment(seg, clips, root, wd, out, cleanup, sfx_dir)
 
-    listing = rdir / "concat.txt"
-    listing.write_text("".join(f"file '{p.as_posix()}'\n" for p in seg_files), encoding="utf-8")
-    joined = rdir / "joined.mp4"
-    run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-f", "concat", "-safe", "0",
-         "-i", str(listing), "-c", "copy", str(joined)])
-
-    # Segment positions from the rendered files, not the plan: frame rounding adds up.
-    offsets, spans, t = [], [], 0.0
-    for f, seg in zip(seg_files, plan["segments"]):
-        d = probe_duration(f)
-        offsets.append(t)
-        spans.append((t, t + d, seg.get("music", True)))
-        t += d
+    # Segment positions come from the rendered files, not the plan (frame
+    # rounding adds up), minus any transition overlaps.
+    joined, positions = join_segments(seg_files, plan["segments"], rdir)
+    offsets = [a for a, _ in positions]
+    spans = [(a, b, seg.get("music", True)) for (a, b), seg in zip(positions, plan["segments"])]
 
     captions = None
     if plan.get("captions"):
