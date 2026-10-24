@@ -155,6 +155,30 @@ possible if its a youtube video. have it prompt to ask"):
   zoomed-in -> wide, with real hand/body motion visibly continuing at each
   point (proves it isn't frozen on one frame).
 
+## render.py: picture-in-picture, fades, music ducking, captions (added 2026-10-23, her call after asking what free features could be added; she picked my suggested order PiP -> fades/music -> captions)
+
+- `"pip"` on any segment insets another clip (own source start, silent,
+  white border, 0.2s alpha fade in/out, holds last frame if the source runs
+  out). video1 uses it twice: phone screen recording on the right while she
+  says "syncs with my phone" (rec 140s) and "the watermelon" (rec 196s). On
+  her fridge shots the tablet sits mid-frame and the right third is empty
+  fridge door, so `"position": "right"` is the default for her.
+- `"fade_in"`/`"fade_out"` (picture to/from black + audio) and `"volume_db"`
+  per segment. Every cut still gets the 20ms anti-click audio fade.
+- Plan-level `"music"` loops a track from `music_dir` under the whole video,
+  ducked by `sidechaincompress` keyed on the voice, 1.5s fade in / 3s fade
+  out. Refused unless `"destination": "youtube"` (see taste log).
+- `"captions": true` burns in short (<=4 word) chunks in Arial Black via an
+  .ass file + `subtitles` filter. Words map onto the output timeline by clip
+  file stem, including block voiceover pieces, so a transcribed vo.wav gets
+  captions automatically. Segment offsets come from the rendered files'
+  real durations, not plan maths, because frame rounding drifts. libass on
+  Windows needs `fontsdir='C\:/Windows/Fonts'`, and ffmpeg runs with cwd =
+  work dir so the .ass path has no drive colon to escape.
+- Lost once: a `git pull` that reset to a rewritten origin/main wiped this
+  work while it was uncommitted, and it was re-merged on top of the
+  atempo_chain/zoom version. Commit render.py changes promptly.
+
 ## catalog_music.py (new, 2026-10-23, her call: she wants to be able to
 provide a music folder eventually and have the pipeline catalog it)
 
@@ -296,6 +320,16 @@ provide a music folder eventually and have the pipeline catalog it)
 
 ## Editing taste log
 
+- **Background music: YouTube videos only, never Amazon videos** (Liz's rule,
+  2026-10-23). She makes videos for both destinations, so before adding music
+  (from `music_dir`) know which one a video is for — if it isn't clear, ask
+  her rather than guessing. An Amazon cut gets voice/clip audio only.
+  render.py enforces it: a plan with `"music"` must also say
+  `"destination": "youtube"` or the render stops.
+- **No captions** (Liz, 2026-10-23, right after I built burned-in
+  captions): "I dont want captions". Keep `"captions"` off in plans; the
+  feature stays in render.py, off by default, but don't add it unless she
+  asks. No reason given; ask before assuming it also covers title text.
 - She asked for a ~5 min target on video1 (2026-10-23) even though a tight
   cut was ~4 min; she prefers padding with real content (full-speed screen
   recording) over cutting short. Unconfirmed whether that's a general rule.

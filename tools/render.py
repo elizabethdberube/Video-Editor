@@ -22,17 +22,54 @@ segments, played in order:
         audio on top (voiceover over a silent screen recording). "at" is the
         offset inside the block. The block's own clip audio is dropped.
 
+Any segment can also take:
+    "pip": {"clip": "rec", "start": 140, "speed": 1, "position": "right", "height": 0.75}
+        Another clip inset over this one, running from its own source "start"
+        for as long as the segment lasts (holds its last frame if it runs out).
+        Silent. position: left/right/top-left/top-right/bottom-left/bottom-right.
+        height: fraction of the frame (default 0.75 vertical, 0.32 otherwise).
+    "fade_in" / "fade_out": seconds, picture from/to black and audio with it.
+    "volume_db": gain on the segment's audio.
+    "overlays": [{"graphic": "warning1.mov", "at": 37.2}]
+        Transparent graphics from graphics.py (<work_dir>/graphics/), or
+        any PNG with "duration". Plays once, from "at".
+    "sfx": [{"file": "whoosh.wav", "at": 37.0, "volume_db": -6}]
+        Sound effects from the shared pool (_editor/assets/sfx/, falling
+        back to the work dir), mixed on top of the segment's audio.
+    For overlays and sfx, "at" on a clip segment is that clip's SOURCE time
+    (so re-trimming the segment doesn't move the graphic off its moment);
+    on a photo or block it's seconds into the segment. Anything that would
+    start outside the segment is skipped with a warning.
+
+Plan-level options:
+    "destination": "youtube" | "amazon"   -- required if "music" is set.
+    "music": {"file": "track.mp3", "volume_db": -20}
+        Looped under the whole video and ducked whenever someone talks.
+        File is relative to music_dir in config.json. Refused for Amazon
+        videos: Liz's rule is music on YouTube videos only.
+    "voice_cleanup": true
+        Rumble cut, noise reduction, a little presence and gentle
+        compression on every clip's own audio and clip voiceover pieces
+        (not music or sfx), and on voiceover files in blocks. A clip can opt
+        out with "voice_cleanup": false.
+    "captions": true, "transcripts": ["transcript.json", "../other/transcript.json"]
+        Burn in captions from the word timings. Words are matched to plan
+        clips by file stem (transcribe.py's default clip id), so audio from
+        any clip (or a transcribed voiceover file) gets captioned wherever
+        the plan uses it.
+
 "clips" maps short ids to files under footage_root. Each clip's "layout" is
 "fill" (crop to 16:9, default) or "vertical" (phone screen centred over a
 blurred copy of itself). "audio_track" picks the audio stream (default 0;
 iPhone .MOVs also carry an unusable 4ch apac track as 0:a:1).
 
 Segments render to <work_dir>/render/NNN.mp4 in one uniform format, then get
-concatenated and loudness-normalised to -14 LUFS (YouTube's target).
+concatenated, music-mixed, captioned and loudness-normalised to -14 LUFS.
 
 Usage:
     python tools/render.py --name video1
     python tools/render.py --name video1 --only 3      # re-render one segment, then re-join
+    python tools/render.py --name video1 --preview     # fast 540p review copy -> <name>_preview.mp4
 """
 import argparse
 import json
@@ -41,19 +78,35 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import load, work_dir
+from config import assets_dir, load, work_dir
 
 W, H, FPS = 1920, 1080, 30
 VIDEO_OUT = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
              "-pix_fmt", "yuv420p", "-r", str(FPS)]
 AUDIO_OUT = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 FADE = 0.02  # short audio fades at every cut, so hard cuts don't click
+PIP_MARGIN = 40
+LOUDNORM = "I=-14:TP=-1.5:LRA=11"
+# Rumble cut, noise reduction tuned to her iPhone audio's real floor (~-55
+# dB), a little less boxiness, a little more presence, then a gentle gate
+# that dips pauses by at most 12 dB. Measured on IMG_0895: voice-to-pause gap
+# 29.3 dB -> 37.8 dB with speech level unchanged. A compressor was tried
+# first and dropped: its makeup gain raised the pauses as much as the noise
+# reduction lowered them (gap 29.2 dB), and loudnorm evens out levels anyway.
+VOICE_CLEANUP = ("highpass=f=80,afftdn=nf=-60:nr=15:tn=1,"
+                 "equalizer=f=250:t=q:w=1:g=-2,equalizer=f=3500:t=q:w=1.2:g=2,"
+                 "agate=threshold=0.01:ratio=3:attack=5:release=250:range=0.25")
 
 
-def run(cmd):
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def voice_chain(clip: dict, cleanup: bool) -> str:
+    return VOICE_CLEANUP + "," if cleanup and clip.get("voice_cleanup", True) else ""
+
+
+def run(cmd, cwd=None):
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed:\n{' '.join(cmd)}\n{proc.stderr.decode(errors='replace')[-3000:]}")
+    return proc
 
 
 def has_audio(path: Path, track: int) -> bool:
@@ -61,6 +114,16 @@ def has_audio(path: Path, track: int) -> bool:
                           "-show_entries", "stream=index", "-of", "csv=p=0", str(path)],
                          stdout=subprocess.PIPE).stdout.strip()
     return bool(out)
+
+
+def probe_duration(path: Path) -> float:
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                          "-of", "csv=p=0", str(path)], stdout=subprocess.PIPE).stdout
+    return float(out.strip())
+
+
+def n_inputs(cmd) -> int:
+    return cmd.count("-i")
 
 
 def layout_filter(layout: str, src: str, out: str) -> str:
@@ -72,10 +135,6 @@ def layout_filter(layout: str, src: str, out: str) -> str:
                 f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2,setsar=1[{out}]")
     return (f"[{src}]scale={W}:{H}:force_original_aspect_ratio=increase,"
             f"crop={W}:{H},setsar=1[{out}]")
-
-
-def audio_fades(dur: float) -> str:
-    return f"afade=t=in:d={FADE},afade=t=out:st={max(dur - FADE, 0):.3f}:d={FADE}"
 
 
 def atempo_chain(speed: float) -> str:
@@ -97,7 +156,7 @@ def zoom_filter(zoom: dict, dur: float, src: str, out: str) -> str:
     """Punch-in via zoompan (crop's w/h are only evaluated once at filter
     init in this ffmpeg build -- confirmed by testing, so a time-varying
     crop size doesn't work; zoompan is the filter actually built for this,
-    and render_photo already relies on it for push-ins). d=1 so every
+    and photo_graph already relies on it for push-ins). d=1 so every
     output frame consumes the next real input frame -- motion keeps playing
     instead of freezing on one frame like a photo push-in does. Expressions
     use 'on' (output frame number), eased in/held/eased out in frames."""
@@ -116,27 +175,41 @@ def zoom_filter(zoom: dict, dur: float, src: str, out: str) -> str:
     return f"[{src}]zoompan=z='{z}':x='{x}':y='{y}':d=1:s={W}x{H}:fps={FPS}[{out}]"
 
 
-def render_clip(seg, clips, root, out: Path):
+def segment_duration(seg) -> float:
+    if "photo" in seg:
+        return seg["duration"]
+    if "block" in seg:
+        return sum((p["end"] - p["start"]) / p.get("speed", 1.0) for p in seg["video"])
+    return (seg["end"] - seg["start"]) / seg.get("speed", 1.0)
+
+
+# --- per-segment graphs: each appends inputs to cmd and returns a filtergraph
+# --- that ends in [vb] (picture) and [ab] (audio), both exactly dur long.
+
+def silence(cmd, dur) -> str:
+    i = n_inputs(cmd)
+    cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+    return f"[{i}:a]anull[ab]"
+
+
+def clip_graph(seg, clips, root, cmd, dur, cleanup):
     c = clips[seg["clip"]]
     path = root / c["file"]
     speed = seg.get("speed", 1.0)
-    dur = (seg["end"] - seg["start"]) / speed
     track = c.get("audio_track", 0)
-    fc = (f"[0:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS}[v0];"
+    i = n_inputs(cmd)
+    cmd += ["-ss", f"{seg['start']:.3f}", "-to", f"{seg['end']:.3f}", "-i", str(path)]
+    fc = (f"[{i}:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS}[v0];"
           + layout_filter(c.get("layout", "fill"), "v0", "v1"))
     if "zoom" in seg:
-        fc += ";" + zoom_filter(seg["zoom"], dur, "v1", "v")
+        fc += ";" + zoom_filter(seg["zoom"], dur, "v1", "vb")
     else:
-        fc += ";[v1]null[v]"
-    cmd = ["ffmpeg", "-nostdin", "-y", "-v", "error",
-           "-ss", f"{seg['start']:.3f}", "-to", f"{seg['end']:.3f}", "-i", str(path)]
+        fc += ";[v1]null[vb]"
     if has_audio(path, track):
-        fc += f";[0:a:{track}]{atempo_chain(speed)},{audio_fades(dur)}[a]"
+        fc += f";[{i}:a:{track}]{voice_chain(c, cleanup)}{atempo_chain(speed)},apad,atrim=0:{dur:.3f}[ab]"
     else:
-        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
-        fc += ";[1:a]anull[a]"
-    run(cmd + ["-filter_complex", fc, "-map", "[v]", "-map", "[a]",
-               "-t", f"{dur:.3f}", *VIDEO_OUT, *AUDIO_OUT, str(out)])
+        fc += ";" + silence(cmd, dur)
+    return fc
 
 
 def still_png(name: str, root: Path, wd: Path) -> Path:
@@ -152,64 +225,298 @@ def still_png(name: str, root: Path, wd: Path) -> Path:
     return png
 
 
-def render_photo(seg, root, wd, out: Path):
-    dur = seg["duration"]
+def photo_graph(seg, root, wd, cmd, dur):
     frames = round(dur * FPS)
-    fc = (f"[0:v]scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,crop={W * 2}:{H * 2},"
+    i = n_inputs(cmd)
+    cmd += ["-i", str(still_png(seg["photo"], root, wd))]
+    fc = (f"[{i}:v]scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,crop={W * 2}:{H * 2},"
           f"zoompan=z='1+0.06*on/{frames}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':"
-          f"d={frames}:s={W}x{H}:fps={FPS},setsar=1[v]")
-    run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-i", str(still_png(seg["photo"], root, wd)),
-         "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
-         "-filter_complex", fc, "-map", "[v]", "-map", "1:a", "-t", f"{dur:.3f}",
-         *VIDEO_OUT, *AUDIO_OUT, str(out)])
+          f"d={frames}:s={W}x{H}:fps={FPS},setsar=1[vb]")
+    return fc + ";" + silence(cmd, dur)
 
 
-def render_block(seg, clips, root, wd, out: Path):
-    cmd = ["ffmpeg", "-nostdin", "-y", "-v", "error"]
-    parts, n, dur = [], 0, 0.0
-    layout = None
-    for piece in seg["video"]:
+def block_graph(seg, clips, root, wd, cmd, dur, cleanup):
+    parts, labels, layout = [], [], None
+    for k, piece in enumerate(seg["video"]):
         c = clips[piece["clip"]]
         layout = layout or c.get("layout", "fill")
         speed = piece.get("speed", 1.0)
+        i = n_inputs(cmd)
         cmd += ["-ss", f"{piece['start']:.3f}", "-to", f"{piece['end']:.3f}", "-i", str(root / c["file"])]
-        parts.append(f"[{n}:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS},setsar=1[p{n}]")
-        dur += (piece["end"] - piece["start"]) / speed
-        n += 1
-    fc = ";".join(parts) + ";" + "".join(f"[p{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0[cat];"
-    fc += layout_filter(layout, "cat", "v")
+        parts.append(f"[{i}:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS},setsar=1[p{k}]")
+        labels.append(f"[p{k}]")
+    fc = ";".join(parts) + ";" + "".join(labels) + f"concat=n={len(labels)}:v=1:a=0[cat];"
+    fc += layout_filter(layout, "cat", "vb")
 
     # Silent bed for the whole block, then every audio piece mixed in at its offset.
+    bed = n_inputs(cmd)
     cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
-    bed, n = n, n + 1
     mix = [f"[{bed}:a]"]
     for k, a in enumerate(seg.get("audio", [])):
+        i = n_inputs(cmd)
         if "file" in a:
-            src = wd / a["file"]
-            cmd += ["-i", str(src)]
-            track, adur = 0, None
+            cmd += ["-i", str(wd / a["file"])]
+            track, fades, voice = 0, "", voice_chain({}, cleanup)
         else:
             c = clips[a["clip"]]
-            src = root / c["file"]
-            cmd += ["-ss", f"{a['start']:.3f}", "-to", f"{a['end']:.3f}", "-i", str(src)]
-            track, adur = c.get("audio_track", 0), a["end"] - a["start"]
+            cmd += ["-ss", f"{a['start']:.3f}", "-to", f"{a['end']:.3f}", "-i", str(root / c["file"])]
+            adur = a["end"] - a["start"]
+            track, voice = c.get("audio_track", 0), voice_chain(c, cleanup)
+            fades = f"afade=t=in:d={FADE},afade=t=out:st={adur - FADE:.3f}:d={FADE},"
         delay = int(a.get("at", 0) * 1000)
-        fades = audio_fades(adur) + "," if adur else ""
-        fc += (f";[{n}:a:{track}]aresample=48000,aformat=channel_layouts=stereo,{fades}"
+        fc += (f";[{i}:a:{track}]aresample=48000,aformat=channel_layouts=stereo,{voice}{fades}"
                f"adelay={delay}:all=1[a{k}]")
         mix.append(f"[a{k}]")
-        n += 1
-    fc += f";{''.join(mix)}amix=inputs={len(mix)}:duration=first:normalize=0[a]"
+    fc += f";{''.join(mix)}amix=inputs={len(mix)}:duration=first:normalize=0[ab]"
+    return fc
+
+
+PIP_POS = {
+    "right": ("W-w-{m}", "(H-h)/2"), "left": ("{m}", "(H-h)/2"),
+    "top-right": ("W-w-{m}", "{m}"), "top-left": ("{m}", "{m}"),
+    "bottom-right": ("W-w-{m}", "H-h-{m}"), "bottom-left": ("{m}", "H-h-{m}"),
+}
+
+
+def pip_graph(pip, clips, root, cmd, dur) -> str:
+    """Inset another clip over [vb], output [vp]."""
+    c = clips[pip["clip"]]
+    speed = pip.get("speed", 1.0)
+    vertical = c.get("layout") == "vertical"
+    height = int(H * pip.get("height", 0.75 if vertical else 0.32)) // 2 * 2
+    end = pip["start"] + dur * speed
+    i = n_inputs(cmd)
+    cmd += ["-ss", f"{pip['start']:.3f}", "-to", f"{end:.3f}", "-i", str(root / c["file"])]
+    x, y = (s.format(m=PIP_MARGIN) for s in PIP_POS[pip.get("position", "right")])
+    border = 6
+    return (f";[{i}:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS},"
+            f"tpad=stop_mode=clone:stop_duration={dur:.3f},trim=0:{dur:.3f},"
+            f"scale=-2:{height - 2 * border},pad=iw+{2 * border}:ih+{2 * border}:{border}:{border}:white,"
+            f"format=yuva420p,fade=t=in:d=0.2:alpha=1,fade=t=out:st={dur - 0.2:.3f}:d=0.2:alpha=1[pip];"
+            f"[vb][pip]overlay={x}:{y}:shortest=0:eof_action=pass[vp]")
+
+
+def seg_time(seg, at: float) -> float:
+    """Where "at" lands inside this segment's output (see docstring)."""
+    if "clip" in seg:
+        return (at - seg["start"]) / seg.get("speed", 1.0)
+    return at
+
+
+def placed_items(seg, key, dur, label):
+    for item in seg.get(key, []):
+        t = seg_time(seg, item["at"])
+        if 0 <= t < dur:
+            yield item, t
+        else:
+            print(f"  warning: {key} {item.get(label)} at {item['at']} falls outside "
+                  f"{seg_label(seg)}, skipped", file=sys.stderr)
+
+
+def overlays_graph(seg, wd, cmd, dur, vlabel) -> tuple[str, str]:
+    fc = ""
+    for k, (o, t) in enumerate(placed_items(seg, "overlays", dur, "graphic")):
+        src = wd / "graphics" / o["graphic"]
+        i = n_inputs(cmd)
+        if src.suffix.lower() == ".png":
+            cmd += ["-loop", "1", "-t", f"{o['duration']:.3f}", "-i", str(src)]
+        else:
+            cmd += ["-i", str(src)]
+        fc += (f";[{i}:v]scale={W}:{H},format=yuva420p,setpts=PTS-STARTPTS+{t:.3f}/TB[g{k}];"
+               f"[{vlabel}][g{k}]overlay=0:0:eof_action=pass[vo{k}]")
+        vlabel = f"vo{k}"
+    return fc, vlabel
+
+
+def sfx_graph(seg, cfg_sfx_dir: Path, wd, cmd, dur) -> tuple[str, list]:
+    fc, labels = "", []
+    for k, (s, t) in enumerate(placed_items(seg, "sfx", dur, "file")):
+        src = cfg_sfx_dir / s["file"]
+        if not src.exists():
+            src = wd / s["file"]
+        i = n_inputs(cmd)
+        cmd += ["-i", str(src)]
+        fc += (f";[{i}:a]aresample=48000,aformat=channel_layouts=stereo,"
+               f"volume={s.get('volume_db', 0)}dB,adelay={int(t * 1000)}:all=1[s{k}]")
+        labels.append(f"[s{k}]")
+    return fc, labels
+
+
+def render_segment(seg, clips, root, wd, out: Path, cleanup: bool, sfx_dir: Path):
+    dur = segment_duration(seg)
+    cmd = ["ffmpeg", "-nostdin", "-y", "-v", "error"]
+    if "photo" in seg:
+        fc = photo_graph(seg, root, wd, cmd, dur)
+    elif "block" in seg:
+        fc = block_graph(seg, clips, root, wd, cmd, dur, cleanup)
+    else:
+        fc = clip_graph(seg, clips, root, cmd, dur, cleanup)
+
+    vlabel = "vb"
+    if "pip" in seg:
+        fc += pip_graph(seg["pip"], clips, root, cmd, dur)
+        vlabel = "vp"
+    ofc, vlabel = overlays_graph(seg, wd, cmd, dur, vlabel)
+    fc += ofc
+
+    fin, fout = seg.get("fade_in", 0), seg.get("fade_out", 0)
+    vf = ["format=yuv420p"]
+    if fin:
+        vf.append(f"fade=t=in:d={fin}")
+    if fout:
+        vf.append(f"fade=t=out:st={dur - fout:.3f}:d={fout}")
+    fc += f";[{vlabel}]{','.join(vf)}[v]"
+
+    fc += f";[ab]volume={seg.get('volume_db', 0)}dB[abv]"
+    sfc, sfx_labels = sfx_graph(seg, sfx_dir, wd, cmd, dur)
+    fc += sfc
+    alabel = "abv"
+    if sfx_labels:
+        fc += f";[abv]{''.join(sfx_labels)}amix=inputs={len(sfx_labels) + 1}:duration=first:normalize=0[abs]"
+        alabel = "abs"
+    fc += (f";[{alabel}]afade=t=in:d={max(fin, FADE)},"
+           f"afade=t=out:st={dur - max(fout, FADE):.3f}:d={max(fout, FADE)}[a]")
     run(cmd + ["-filter_complex", fc, "-map", "[v]", "-map", "[a]", "-t", f"{dur:.3f}",
                *VIDEO_OUT, *AUDIO_OUT, str(out)])
 
 
 def seg_label(seg) -> str:
     if "photo" in seg:
-        return f"photo {seg['photo']} {seg['duration']}s"
-    if "block" in seg:
-        return f"block {seg['block']} ({len(seg['video'])} pieces, {len(seg.get('audio', []))} audio)"
-    return f"{seg['clip']} {seg['start']:.2f}-{seg['end']:.2f}"
+        s = f"photo {seg['photo']} {seg['duration']}s"
+    elif "block" in seg:
+        s = f"block {seg['block']} ({len(seg['video'])} pieces, {len(seg.get('audio', []))} audio)"
+    else:
+        s = f"{seg['clip']} {seg['start']:.2f}-{seg['end']:.2f}"
+    return s + (f" + pip {seg['pip']['clip']}" if "pip" in seg else "")
+
+
+# --- captions
+
+def load_words(plan, wd: Path) -> dict:
+    """All transcript words, grouped by clip id (= source file stem)."""
+    by_clip = {}
+    for t in plan.get("transcripts", ["transcript.json"]):
+        data = json.loads((wd / t).read_text(encoding="utf-8"))
+        for w in data["words"]:
+            by_clip.setdefault(w["clip"], []).append(w)
+    return by_clip
+
+
+def caption_words(plan, wd, offsets):
+    """Every spoken word that survives the edit, placed on the output timeline."""
+    words = load_words(plan, wd)
+    clips = plan["clips"]
+    placed = []
+
+    def place(stem, src_start, src_end, out_start, speed):
+        for w in words.get(stem, []):
+            mid = (w["start"] + w["end"]) / 2
+            if src_start <= mid < src_end:
+                placed.append((out_start + (w["start"] - src_start) / speed,
+                               out_start + (w["end"] - src_start) / speed, w["word"]))
+
+    for seg, off in zip(plan["segments"], offsets):
+        if "clip" in seg:
+            place(Path(clips[seg["clip"]]["file"]).stem, seg["start"], seg["end"], off, seg.get("speed", 1.0))
+        elif "block" in seg:
+            for a in seg.get("audio", []):
+                if "file" in a:
+                    place(Path(a["file"]).stem, 0, 1e9, off + a.get("at", 0), 1.0)
+                else:
+                    place(Path(clips[a["clip"]]["file"]).stem, a["start"], a["end"], off + a.get("at", 0), 1.0)
+    return sorted(placed)
+
+
+def chunk_captions(words, max_words=4, max_chars=24, max_gap=0.35):
+    """Short punchy chunks: break on punctuation, pauses, or length."""
+    chunks, cur = [], []
+    for w in words:
+        if cur and (len(cur) >= max_words or w[0] - cur[-1][1] > max_gap
+                    or len(" ".join(x[2] for x in cur + [w])) > max_chars):
+            chunks.append(cur)
+            cur = []
+        cur.append(w)
+        if w[2][-1:] in ".,?!":
+            chunks.append(cur)
+            cur = []
+    if cur:
+        chunks.append(cur)
+    out = []
+    for k, ch in enumerate(chunks):
+        start, end = ch[0][0], ch[-1][1]
+        if k + 1 < len(chunks) and chunks[k + 1][0][0] - end < 0.25:
+            end = chunks[k + 1][0][0]
+        out.append((start, end, " ".join(x[2] for x in ch)))
+    return out
+
+
+def write_ass(chunks, path: Path):
+    def ts(t):
+        cs = int(round(t * 100))
+        return f"{cs // 360000}:{cs // 6000 % 60:02d}:{cs // 100 % 60:02d}.{cs % 100:02d}"
+
+    lines = [
+        "[Script Info]", "ScriptType: v4.00+", f"PlayResX: {W}", f"PlayResY: {H}", "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
+        "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        "Style: Cap,Arial Black,64,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,"
+        "0,0,0,0,100,100,0,0,1,5,2,2,80,80,90,1", "",
+        "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    for start, end, text in chunks:
+        lines.append(f"Dialogue: 0,{ts(start)},{ts(end)},Cap,,0,0,0,,{text}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# --- final mix
+
+def audio_graph(plan, cfg, inputs) -> str:
+    """Joined voice audio, plus ducked music for YouTube videos. Ends in [mix]."""
+    music = plan.get("music")
+    if not music:
+        return "[0:a]anull[mix]"
+    if not cfg.get("music_dir"):
+        sys.exit("plan has music but music_dir isn't set in config.json")
+    total = probe_duration(Path(inputs[1]))
+    i = n_inputs(inputs)
+    inputs += ["-stream_loop", "-1", "-i", str(Path(cfg["music_dir"]) / music["file"])]
+    return (f"[0:a]asplit[voice][key];"
+            f"[{i}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:{total:.3f},"
+            f"volume={music.get('volume_db', -20)}dB,afade=t=in:d=1.5,"
+            f"afade=t=out:st={total - 3:.3f}:d=3[music];"
+            f"[music][key]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=400[ducked];"
+            f"[voice][ducked]amix=inputs=2:duration=first:normalize=0[mix]")
+
+
+def finalise(plan, cfg, joined: Path, wd: Path, final: Path, captions: Path | None):
+    inputs = ["-i", str(joined)]
+    agraph = audio_graph(plan, cfg, inputs)
+
+    # Two-pass loudnorm on the final mix. Single-pass only approaches the
+    # target (measured -16.6 LUFS for a -14 target on video1); measuring
+    # first and applying one linear gain hits it.
+    proc = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", *inputs, "-filter_complex",
+                           f"{agraph};[mix]loudnorm={LOUDNORM}:print_format=json[out]",
+                           "-map", "[out]", "-f", "null", "-"],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    err = proc.stderr.decode(errors="replace")
+    m = json.loads(err[err.rindex("{"):err.rindex("}") + 1])
+    loudnorm = (f"loudnorm={LOUDNORM}:linear=true:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
+                f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:offset={m['target_offset']}")
+
+    fc = f"{agraph};[mix]{loudnorm},aresample=48000[a]"
+    if captions:
+        # Relative filename (ffmpeg runs in wd) avoids escaping the drive colon;
+        # fontsdir points libass at Windows fonts since there's no fontconfig.
+        fc += f";[0:v]subtitles={captions.name}:fontsdir='C\\:/Windows/Fonts'[v]"
+        vmap, vcodec = "[v]", VIDEO_OUT
+    else:
+        vmap, vcodec = "0:v", ["-c:v", "copy"]
+    run(["ffmpeg", "-nostdin", "-y", "-v", "error", *inputs, "-filter_complex", fc,
+         "-map", vmap, "-map", "[a]", *vcodec, *AUDIO_OUT, "-movflags", "+faststart", str(final)],
+        cwd=wd)
 
 
 def main():
@@ -218,14 +525,27 @@ def main():
     ap.add_argument("--plan", default="plan.json")
     ap.add_argument("--only", type=int, action="append", help="re-render only these segment numbers")
     ap.add_argument("--out", help="output file (default <work_dir>/<name>.mp4)")
+    ap.add_argument("--preview", action="store_true",
+                    help="fast 960x540 review render into render_preview/, output <name>_preview.mp4")
     args = ap.parse_args()
+
+    global W, H, VIDEO_OUT, PIP_MARGIN
+    if args.preview:
+        W, H, PIP_MARGIN = 960, 540, 20
+        VIDEO_OUT = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                     "-pix_fmt", "yuv420p", "-r", str(FPS)]
 
     cfg = load()
     root = cfg["footage_root"]
     wd = work_dir(args.name)
     plan = json.loads((wd / args.plan).read_text(encoding="utf-8"))
+    if plan.get("music") and plan.get("destination") != "youtube":
+        sys.exit(f"plan has music but destination is {plan.get('destination')!r}: background music "
+                 f"is only for YouTube videos, never Amazon. Set \"destination\": \"youtube\" or drop \"music\".")
     clips = plan["clips"]
-    rdir = wd / "render"
+    cleanup = plan.get("voice_cleanup", False)
+    sfx_dir = assets_dir("sfx")
+    rdir = wd / ("render_preview" if args.preview else "render")
     rdir.mkdir(exist_ok=True)
 
     seg_files = []
@@ -235,12 +555,7 @@ def main():
         if args.only and i not in args.only and out.exists():
             continue
         print(f"[{i + 1}/{len(plan['segments'])}] {seg_label(seg)}", file=sys.stderr)
-        if "photo" in seg:
-            render_photo(seg, root, wd, out)
-        elif "block" in seg:
-            render_block(seg, clips, root, wd, out)
-        else:
-            render_clip(seg, clips, root, out)
+        render_segment(seg, clips, root, wd, out, cleanup, sfx_dir)
 
     listing = rdir / "concat.txt"
     listing.write_text("".join(f"file '{p.as_posix()}'\n" for p in seg_files), encoding="utf-8")
@@ -248,26 +563,24 @@ def main():
     run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-f", "concat", "-safe", "0",
          "-i", str(listing), "-c", "copy", str(joined)])
 
-    final = Path(args.out) if args.out else wd / f"{args.name}.mp4"
-    print("normalising loudness to -14 LUFS", file=sys.stderr)
-    run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-i", str(joined),
-         "-af", loudnorm_filter(joined), "-c:v", "copy", *AUDIO_OUT,
-         "-movflags", "+faststart", str(final)])
+    captions = None
+    if plan.get("captions"):
+        # Offsets from the rendered files, not the plan: frame rounding adds up.
+        offsets, t = [], 0.0
+        for f in seg_files:
+            offsets.append(t)
+            t += probe_duration(f)
+        chunks = chunk_captions(caption_words(plan, wd, offsets))
+        captions = wd / "captions.ass"
+        write_ass(chunks, captions)
+        print(f"{len(chunks)} caption chunks", file=sys.stderr)
+
+    final = Path(args.out) if args.out else wd / f"{args.name}{'_preview' if args.preview else ''}.mp4"
+    print("final mix: " + ", ".join(x for x in [
+        "music" if plan.get("music") else "", "captions" if captions else "", "loudness -14 LUFS"] if x),
+        file=sys.stderr)
+    finalise(plan, cfg, joined, wd, final.resolve(), captions)
     print(f"wrote {final}")
-
-
-def loudnorm_filter(path: Path) -> str:
-    """Two-pass loudnorm. Single-pass only approaches the target (measured
-    -16.6 LUFS for a -14 target on video1); measuring first and applying a
-    linear gain hits it."""
-    target = "I=-14:TP=-1.5:LRA=11"
-    proc = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-i", str(path), "-vn",
-                           "-af", f"loudnorm={target}:print_format=json", "-f", "null", "-"],
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    err = proc.stderr.decode(errors="replace")
-    m = json.loads(err[err.rindex("{"):err.rindex("}") + 1])
-    return (f"loudnorm={target}:linear=true:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
-            f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:offset={m['target_offset']}")
 
 
 if __name__ == "__main__":

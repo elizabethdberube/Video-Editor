@@ -54,8 +54,40 @@ tied to a moment.
   folder of background music (point `music_dir` in `config.json` at it
   once you have one)
 
-`render.py` also supports slow-motion/fast-forward (`"speed"`) and
-punch-in zooms (`"zoom"`) on clip segments — see its docstring.
+`render.py` also supports, all set in `plan.json` (see its docstring):
+
+- slow-motion/fast-forward (`"speed"`) and punch-in zooms (`"zoom"`)
+- **picture-in-picture** (`"pip"`): inset a second clip, e.g. the phone
+  screen recording beside you demoing the device
+- **fades** to/from black (`"fade_in"`, `"fade_out"`) and per-segment volume
+  (`"volume_db"`)
+- **background music** (`"music"`) that dips automatically while you talk.
+  YouTube videos only: the plan must say `"destination": "youtube"`, and
+  Amazon videos never get music.
+- burned-in captions (`"captions": true`) built from the transcript. Off
+  by default, and not used on this channel's videos.
+
+## Where things go
+
+- **Background music:** put tracks in the folder set as `music_dir` in
+  `config.json` (on the Windows laptop:
+  `C:\Users\eliza\OneDrive\Desktop\YouTube\_music`). Use only music you're
+  allowed to use on YouTube, such as the YouTube Audio Library.
+- **Finished videos:** `<footage root>\_editor\work\<video>\<video>.mp4`.
+
+## Windows setup (no NVIDIA GPU)
+
+1. `winget install Python.Python.3.12` and `winget install Gyan.FFmpeg`
+2. `python -m venv .venv`
+3. `.venv\Scripts\python -m pip install torch --index-url https://download.pytorch.org/whl/cpu`
+   (don't add torchaudio)
+4. `.venv\Scripts\python -m pip install -r requirements-windows.txt`
+5. Copy `config.example.json` to `config.json` and set `footage_root_windows`
+   (and `music_dir`).
+
+If Windows says "An Application Control policy has blocked this file", that's
+Smart App Control rejecting a brand-new package build. Pin an older version in
+`requirements-windows.txt` rather than turning Smart App Control off.
 
 Still to come: automatic pause-trimming, punch-ins, pacing checks, and a few
 other tools — see the skill file for the full list and current status.
