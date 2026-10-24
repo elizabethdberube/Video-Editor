@@ -36,17 +36,30 @@ Any segment can also take:
     "sfx": [{"file": "whoosh.wav", "at": 37.0, "volume_db": -6}]
         Sound effects from the shared pool (_editor/assets/sfx/, falling
         back to the work dir), mixed on top of the segment's audio.
-    For overlays and sfx, "at" on a clip segment is that clip's SOURCE time
+    "broll": [{"photo": "receipts.jpg", "at": 59.0, "duration": 4},
+              {"clip": "rec", "start": 196, "at": 44.0, "duration": 5}]
+        Full-frame cutaways: the picture switches to a photo (slow push-in)
+        or another clip (from its own source "start", in that clip's
+        layout) while this segment's audio keeps playing.
+    "music": false
+        Keep the background music silent during this segment (it ramps out
+        and back in around it) -- e.g. clips that already have music baked in.
+    For overlays, sfx and broll, "at" on a clip segment is that clip's SOURCE time
     (so re-trimming the segment doesn't move the graphic off its moment);
     on a photo or block it's seconds into the segment. Anything that would
     start outside the segment is skipped with a warning.
 
 Plan-level options:
     "destination": "youtube" | "amazon"   -- required if "music" is set.
-    "music": {"file": "track.mp3", "volume_db": -20}
-        Looped under the whole video and ducked whenever someone talks.
-        File is relative to music_dir in config.json. Refused for Amazon
-        videos: Liz's rule is music on YouTube videos only.
+    "music": {"files": ["a.mp3", "b.mp3"], "level_lufs": -30, "crossfade": 2}
+        A playlist under the video, crossfaded track to track and repeated
+        if it runs short, ducked whenever someone talks. It starts at the
+        first segment that allows music. Each track is gain-matched to
+        level_lufs using its loudness from catalog_music.py's catalog
+        (tracks not in the catalog fall back to "volume_db", default -20).
+        Files are relative to music_dir in config.json. {"file": "x.mp3"}
+        still works for a single track. Refused for Amazon videos: Liz's
+        rule is music on YouTube videos only.
     "voice_cleanup": true
         Rumble cut, noise reduction, a little presence and gentle
         compression on every clip's own audio and clip voiceover pieces
@@ -278,8 +291,8 @@ PIP_POS = {
 }
 
 
-def pip_graph(pip, clips, root, cmd, dur) -> str:
-    """Inset another clip over [vb], output [vp]."""
+def pip_graph(pip, clips, root, cmd, dur, under="vb") -> str:
+    """Inset another clip over [under], output [vp]."""
     c = clips[pip["clip"]]
     speed = pip.get("speed", 1.0)
     vertical = c.get("layout") == "vertical"
@@ -293,7 +306,7 @@ def pip_graph(pip, clips, root, cmd, dur) -> str:
             f"tpad=stop_mode=clone:stop_duration={dur:.3f},trim=0:{dur:.3f},"
             f"scale=-2:{height - 2 * border},pad=iw+{2 * border}:ih+{2 * border}:{border}:{border}:white,"
             f"format=yuva420p,fade=t=in:d=0.2:alpha=1,fade=t=out:st={dur - 0.2:.3f}:d=0.2:alpha=1[pip];"
-            f"[vb][pip]overlay={x}:{y}:shortest=0:eof_action=pass[vp]")
+            f"[{under}][pip]overlay={x}:{y}:shortest=0:eof_action=pass[vp]")
 
 
 def seg_time(seg, at: float) -> float:
@@ -309,8 +322,33 @@ def placed_items(seg, key, dur, label):
         if 0 <= t < dur:
             yield item, t
         else:
-            print(f"  warning: {key} {item.get(label)} at {item['at']} falls outside "
+            print(f"  warning: {key} {item.get(label) or item.get('clip')} at {item['at']} falls outside "
                   f"{seg_label(seg)}, skipped", file=sys.stderr)
+
+
+def broll_graph(seg, clips, root, wd, cmd, dur, vlabel) -> tuple[str, str]:
+    """Full-frame cutaways over the picture; the segment's audio carries on."""
+    fc = ""
+    for k, (b, t) in enumerate(placed_items(seg, "broll", dur, "photo")):
+        d = min(b["duration"], dur - t)
+        i = n_inputs(cmd)
+        if "photo" in b:
+            frames = round(d * FPS)
+            cmd += ["-i", str(still_png(b["photo"], root, wd))]
+            fc += (f";[{i}:v]scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,crop={W * 2}:{H * 2},"
+                   f"zoompan=z='1+0.05*on/{frames}':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':"
+                   f"d={frames}:s={W}x{H}:fps={FPS},setsar=1[by{k}]")
+        else:
+            c = clips[b["clip"]]
+            speed = b.get("speed", 1.0)
+            cmd += ["-ss", f"{b['start']:.3f}", "-to", f"{b['start'] + d * speed:.3f}",
+                    "-i", str(root / c["file"])]
+            fc += (f";[{i}:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS}[bx{k}];"
+                   + layout_filter(c.get("layout", "fill"), f"bx{k}", f"by{k}"))
+        fc += (f";[by{k}]trim=0:{d:.3f},setpts=PTS-STARTPTS+{t:.3f}/TB[bz{k}];"
+               f"[{vlabel}][bz{k}]overlay=0:0:eof_action=pass[vB{k}]")
+        vlabel = f"vB{k}"
+    return fc, vlabel
 
 
 def overlays_graph(seg, wd, cmd, dur, vlabel) -> tuple[str, str]:
@@ -352,9 +390,11 @@ def render_segment(seg, clips, root, wd, out: Path, cleanup: bool, sfx_dir: Path
     else:
         fc = clip_graph(seg, clips, root, cmd, dur, cleanup)
 
-    vlabel = "vb"
+    # Layers, bottom to top: segment picture, B-roll cutaways, PiP, graphics.
+    bfc, vlabel = broll_graph(seg, clips, root, wd, cmd, dur, "vb")
+    fc += bfc
     if "pip" in seg:
-        fc += pip_graph(seg["pip"], clips, root, cmd, dur)
+        fc += pip_graph(seg["pip"], clips, root, cmd, dur, vlabel)
         vlabel = "vp"
     ofc, vlabel = overlays_graph(seg, wd, cmd, dur, vlabel)
     fc += ofc
@@ -472,27 +512,69 @@ def write_ass(chunks, path: Path):
 
 # --- final mix
 
-def audio_graph(plan, cfg, inputs) -> str:
-    """Joined voice audio, plus ducked music for YouTube videos. Ends in [mix]."""
+MUSIC_RAMP = 1.0  # seconds the music takes to duck out/in around "music": false segments
+
+
+def music_catalog() -> dict:
+    p = assets_dir("music") / "catalog.json"
+    if not p.exists():
+        return {}
+    return {t["file"]: t for t in json.loads(p.read_text(encoding="utf-8"))}
+
+
+def audio_graph(plan, cfg, inputs, spans) -> str:
+    """Joined voice audio, plus ducked music for YouTube videos. Ends in [mix].
+    spans: (start, end, music_allowed) per segment on the output timeline."""
     music = plan.get("music")
-    if not music:
+    allowed = [s for s in spans if s[2]]
+    if not music or not allowed:
         return "[0:a]anull[mix]"
     if not cfg.get("music_dir"):
         sys.exit("plan has music but music_dir isn't set in config.json")
-    total = probe_duration(Path(inputs[1]))
-    i = n_inputs(inputs)
-    inputs += ["-stream_loop", "-1", "-i", str(Path(cfg["music_dir"]) / music["file"])]
-    return (f"[0:a]asplit[voice][key];"
-            f"[{i}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:{total:.3f},"
-            f"volume={music.get('volume_db', -20)}dB,afade=t=in:d=1.5,"
-            f"afade=t=out:st={total - 3:.3f}:d=3[music];"
-            f"[music][key]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=400[ducked];"
-            f"[voice][ducked]amix=inputs=2:duration=first:normalize=0[mix]")
+    total = spans[-1][1]
+    start = allowed[0][0]
+    needed = total - start
+    xf = music.get("crossfade", 2.0)
+    catalog = music_catalog()
+    files = music.get("files") or [music["file"]]
+
+    # Repeat the playlist until it covers the video, then crossfade it together.
+    playlist, length = [], -xf
+    while length < needed:
+        f = files[len(playlist) % len(files)]
+        path = Path(cfg["music_dir"]) / f
+        playlist.append((f, path))
+        length += probe_duration(path) - xf
+    fc = "[0:a]asplit[voice][key]"
+    labels = []
+    for k, (f, path) in enumerate(playlist):
+        i = n_inputs(inputs)
+        inputs += ["-i", str(path)]
+        lufs = catalog.get(f, {}).get("lufs")
+        gain = music.get("level_lufs", -30) - lufs if lufs is not None else music.get("volume_db", -20)
+        fc += f";[{i}:a]aresample=48000,aformat=channel_layouts=stereo,volume={gain:.2f}dB[m{k}]"
+        labels.append(f"m{k}")
+    cur = labels[0]
+    for k, nxt in enumerate(labels[1:], 1):
+        fc += f";[{cur}][{nxt}]acrossfade=d={xf}:c1=tri:c2=tri[x{k}]"
+        cur = f"x{k}"
+
+    # Silence the music through "music": false segments, ramping around them.
+    gates = [f"max(0,min(1,max(({a:.3f}-t)/{MUSIC_RAMP},(t-{b:.3f})/{MUSIC_RAMP})))"
+             for a, b, ok in spans if not ok and a > start]
+    gate = f",volume='{'*'.join(gates)}':eval=frame" if gates else ""
+    fc += (f";[{cur}]atrim=0:{needed:.3f},afade=t=in:d=1.5,afade=t=out:st={needed - 3:.3f}:d=3,"
+           f"adelay={int(start * 1000)}:all=1{gate},apad,atrim=0:{total:.3f}[music];"
+           f"[music][key]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=400[ducked];"
+           f"[voice][ducked]amix=inputs=2:duration=first:normalize=0[mix]")
+    print(f"music: {' -> '.join(f for f, _ in playlist)} from {start:.1f}s"
+          + (f", silent through {len(gates)} segment(s)" if gates else ""), file=sys.stderr)
+    return fc
 
 
-def finalise(plan, cfg, joined: Path, wd: Path, final: Path, captions: Path | None, normalise=True):
+def finalise(plan, cfg, joined: Path, wd: Path, final: Path, captions: Path | None, spans, normalise=True):
     inputs = ["-i", str(joined)]
-    agraph = audio_graph(plan, cfg, inputs)
+    agraph = audio_graph(plan, cfg, inputs, spans)
 
     if normalise:
         # Two-pass loudnorm on the final mix. Single-pass only approaches the
@@ -568,13 +650,16 @@ def main():
     run(["ffmpeg", "-nostdin", "-y", "-v", "error", "-f", "concat", "-safe", "0",
          "-i", str(listing), "-c", "copy", str(joined)])
 
+    # Segment positions from the rendered files, not the plan: frame rounding adds up.
+    offsets, spans, t = [], [], 0.0
+    for f, seg in zip(seg_files, plan["segments"]):
+        d = probe_duration(f)
+        offsets.append(t)
+        spans.append((t, t + d, seg.get("music", True)))
+        t += d
+
     captions = None
     if plan.get("captions"):
-        # Offsets from the rendered files, not the plan: frame rounding adds up.
-        offsets, t = [], 0.0
-        for f in seg_files:
-            offsets.append(t)
-            t += probe_duration(f)
         chunks = chunk_captions(caption_words(plan, wd, offsets))
         captions = wd / "captions.ass"
         write_ass(chunks, captions)
@@ -584,7 +669,7 @@ def main():
     steps = [x for x in ["music" if plan.get("music") else "", "captions" if captions else "",
                          "" if args.preview else "loudness -14 LUFS"] if x]
     print("final mix: " + (", ".join(steps) or "join only"), file=sys.stderr)
-    finalise(plan, cfg, joined, wd, final.resolve(), captions, normalise=not args.preview)
+    finalise(plan, cfg, joined, wd, final.resolve(), captions, spans, normalise=not args.preview)
     print(f"wrote {final}")
 
 
