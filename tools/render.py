@@ -272,6 +272,16 @@ def silence(cmd, dur) -> str:
     return f"[{i}:a]anull[ab]"
 
 
+def retime(span: float, speed: float) -> str:
+    """Frame-exact video for an input opened with -ss <start> -to <start+span>.
+    Input seeking alone isn't exact on her VFR screen recordings: ffmpeg keeps
+    the frame that *covers* the seek point (negative pts) and lets a few
+    frames past -to through (decode order), which leaked a "Please select a
+    member" pop-up and an App Store sheet into video1/video2. Trimming on the
+    real timestamps drops both; fps start_time=0 then fills from exactly 0."""
+    return f"trim=start=0:end={span:.3f},setpts=PTS/{speed},fps={FPS}:start_time=0"
+
+
 def clip_graph(seg, clips, root, cmd, dur, cleanup):
     c = clips[seg["clip"]]
     path = root / c["file"]
@@ -279,7 +289,7 @@ def clip_graph(seg, clips, root, cmd, dur, cleanup):
     track = c.get("audio_track", 0)
     i = n_inputs(cmd)
     cmd += ["-ss", f"{seg['start']:.3f}", "-to", f"{seg['end']:.3f}", "-i", str(path)]
-    fc = (f"[{i}:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS}[v0];"
+    fc = (f"[{i}:v]{retime(seg['end'] - seg['start'], speed)}[v0];"
           + layout_filter(c.get("layout", "fill"), "v0", "v1"))
     if "zoom" in seg:
         fc += ";" + zoom_filter(seg["zoom"], dur, "v1", "vb")
@@ -324,7 +334,7 @@ def block_graph(seg, clips, root, wd, cmd, dur, cleanup):
         speed = piece.get("speed", 1.0)
         i = n_inputs(cmd)
         cmd += ["-ss", f"{piece['start']:.3f}", "-to", f"{piece['end']:.3f}", "-i", str(root / c["file"])]
-        parts.append(f"[{i}:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS},setsar=1[p{k}]")
+        parts.append(f"[{i}:v]{retime(piece['end'] - piece['start'], speed)},setsar=1[p{k}]")
         labels.append(f"[p{k}]")
     fc = ";".join(parts) + ";" + "".join(labels) + f"concat=n={len(labels)}:v=1:a=0[cat];"
     fc += layout_filter(layout, "cat", "vb")
@@ -370,7 +380,7 @@ def pip_graph(pip, clips, root, cmd, dur, under="vb") -> str:
     cmd += ["-ss", f"{pip['start']:.3f}", "-to", f"{end:.3f}", "-i", str(root / c["file"])]
     x, y = (s.format(m=PIP_MARGIN) for s in PIP_POS[pip.get("position", "right")])
     border = 6
-    return (f";[{i}:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS},"
+    return (f";[{i}:v]{retime(end - pip['start'], speed)},"
             f"tpad=stop_mode=clone:stop_duration={dur:.3f},trim=end={dur:.3f},"
             f"scale=-2:{height - 2 * border},pad=iw+{2 * border}:ih+{2 * border}:{border}:{border}:white,"
             f"format=yuva420p,fade=t=in:d=0.2:alpha=1,fade=t=out:st={dur - 0.2:.3f}:d=0.2:alpha=1[pip];"
@@ -411,7 +421,7 @@ def broll_graph(seg, clips, root, wd, cmd, dur, vlabel) -> tuple[str, str]:
             speed = b.get("speed", 1.0)
             cmd += ["-ss", f"{b['start']:.3f}", "-to", f"{b['start'] + d * speed:.3f}",
                     "-i", str(root / c["file"])]
-            fc += (f";[{i}:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS}[bx{k}];"
+            fc += (f";[{i}:v]{retime(d * speed, speed)}[bx{k}];"
                    + layout_filter(c.get("layout", "fill"), f"bx{k}", f"by{k}"))
         fc += (f";[by{k}]trim=end={d:.3f},setpts=PTS-STARTPTS+{t:.3f}/TB[bz{k}];"
                f"[{vlabel}][bz{k}]overlay=0:0:eof_action=pass[vB{k}]")
