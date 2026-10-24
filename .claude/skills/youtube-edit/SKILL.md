@@ -124,16 +124,34 @@ and to every edit before it's handed over.
 - **Prefer cutting over blurring.** A cut can't fail; a blur on something
   that moves or animates (sheets sliding in, scrolling) easily misses frames.
   If it must stay visible, blur or box it and check every frame.
-- **Leave margin at cuts, then check every frame at each join.** Her screen
-  recordings are VFR: seeking to the exact boundary leaked one frame of the
-  App Store sheet (start 24.2 showed a frame from before 24.2). Cut ~0.2s
-  wide and inspect the finished video frame by frame across the join.
+- **Find exact frame ranges, then check every frame at each join.** Get
+  the first/last affected frame from real frame timestamps (showinfo on a
+  -copyts -fps_mode passthrough decode), including faint fade-in/out
+  frames, and cut a little outside them. Input -ss/-to alone was NOT frame
+  exact on her VFR screen recordings: ffmpeg kept the frame covering the
+  start point and let frames past -to through, leaking an App Store sheet
+  frame and whole pop-ups. render.py's `retime()` now trims on real
+  timestamps for every clip/piece/PiP/B-roll (verified: the leaking piece
+  ended on 5 pop-up frames before, clean after). Still inspect the finished
+  video frame by frame across each join.
 - Tell her what was found and removed. The raw files still contain it, so
   mention that if she shares raw footage.
 - **Known ranges in current footage** (RecordIt-1791828181.mp4, never use):
   30-99s login/registration (email, typed password, verification code);
   20.4-24.2s App Store install sheet (Apple ID email; cut 20.0-24.4);
   105-112.9s tablet share code being typed (cut 104.0-113.2).
+
+**Also cut app error/warning pop-ups** (Liz, 2026-10-23: "it flashes please
+select a member twice. I would like to edit those pops out"). Treat toasts
+like "Please select a member" as mistakes to hide, not content. Ask before
+assuming neutral ones ("Loading...", "Successfully connected") also go --
+she didn't mention those and they were left in. Known "Please select a
+member" frames in RecordIt: 146.242-147.342, 165.511-166.628,
+180.247-181.330 (cut 146.10-147.45, 165.40-166.70, 180.10-181.42); a PiP
+from 140 ran into the first one, so check PiP/B-roll sources too. Detect
+toasts by the mean brightness of the toast spot (white form ~255, toast
+pulls it under 200) and look at every flagged frame -- the Repeat menu,
+calendar and spinners also trip it.
 
 ## Rule: she must not say "tablet" (Liz, 2026-10-23)
 
