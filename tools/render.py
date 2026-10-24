@@ -60,6 +60,12 @@ Plan-level options:
         Files are relative to music_dir in config.json. {"file": "x.mp3"}
         still works for a single track. Refused for Amazon videos: Liz's
         rule is music on YouTube videos only.
+    "voice_level_lufs": -20
+        Gain every clip's own audio (and voiceover files) so they all sit at
+        the same loudness before mixing, measured once per file and cached
+        in <work_dir>/loudness.json. Without it, sources recorded at
+        different distances play several dB apart and music swamps the
+        quiet ones.
     "voice_cleanup": true
         Rumble cut, noise reduction, a little presence and gentle
         compression on every clip's own audio and clip voiceover pieces
@@ -111,8 +117,68 @@ VOICE_CLEANUP = ("highpass=f=80,afftdn=nf=-60:nr=15:tn=1,"
                  "agate=threshold=0.01:ratio=3:attack=5:release=250:range=0.25")
 
 
-def voice_chain(clip: dict, cleanup: bool) -> str:
-    return VOICE_CLEANUP + "," if cleanup and clip.get("voice_cleanup", True) else ""
+def voice_chain(clip: dict, cleanup: bool, level_db=None) -> str:
+    """Speech processing for one clip's own audio: level-matching gain (from
+    "voice_level_lufs", see set_voice_levels), then optional cleanup."""
+    level_db = clip.get("_level_db") if level_db is None else level_db
+    chain = f"volume={level_db:.2f}dB," if level_db else ""
+    if cleanup and clip.get("voice_cleanup", True):
+        chain += VOICE_CLEANUP + ","
+    return chain
+
+
+MIN_LEVEL_SPAN = 3.0  # shorter pieces use their whole file's loudness; gating needs a few seconds
+
+
+def measure_loudness(path: Path, track: int, wd: Path, start=None, end=None) -> float:
+    """Integrated loudness (LUFS) of one audio track, or a range of it,
+    cached in <work_dir>/loudness.json."""
+    cache_file = wd / "loudness.json"
+    cache = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.exists() else {}
+    key = f"{path.name}|{track}|{start}|{end}|{path.stat().st_mtime_ns}"
+    if key not in cache:
+        rng = ["-ss", f"{start:.3f}", "-to", f"{end:.3f}"] if start is not None else []
+        err = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", *rng, "-i", str(path), "-map", f"0:a:{track}",
+                              "-af", "ebur128", "-f", "null", "-"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE).stderr.decode(errors="replace")
+        summary = err[err.rindex("Integrated loudness"):]
+        cache[key] = float(summary.split("I:")[1].split()[0])
+        cache_file.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    return cache[key]
+
+
+def set_voice_levels(plan, clips, root, wd, target):
+    """Gain every piece of speech to the same loudness before anything is
+    mixed. Her sources differ a lot: on video2, old video -18.3 LUFS,
+    IMG_0895 -22.4, IMG_0942 -29.5 as whole files, and inside the old video
+    the hook, its setup narration and its sign-off sat at about -22, -27 and
+    -17 dB. So each segment (or block audio piece) of MIN_LEVEL_SPAN or more
+    is measured on its own; shorter ones fall back to their file's level."""
+    for cid, c in clips.items():
+        path, track = root / c["file"], c.get("audio_track", 0)
+        if has_audio(path, track):
+            lufs = measure_loudness(path, track, wd)
+            if lufs > -60:  # silent tracks (e.g. her screen recordings) get no gain
+                c["_level_db"] = target - lufs
+
+    def level(c, path, track, start, end):
+        if "_level_db" not in c:
+            return None
+        if end - start < MIN_LEVEL_SPAN:
+            return c["_level_db"]
+        lufs = measure_loudness(path, track, wd, start, end)
+        return target - lufs if lufs > -60 else c["_level_db"]
+
+    for seg in plan["segments"]:
+        if "clip" in seg:
+            c = clips[seg["clip"]]
+            seg["_level_db"] = level(c, root / c["file"], c.get("audio_track", 0), seg["start"], seg["end"])
+        for a in seg.get("audio", []):
+            if "file" in a:
+                a["_level_db"] = target - measure_loudness(wd / a["file"], 0, wd)
+            else:
+                c = clips[a["clip"]]
+                a["_level_db"] = level(c, root / c["file"], c.get("audio_track", 0), a["start"], a["end"])
 
 
 def run(cmd, cwd=None):
@@ -219,7 +285,8 @@ def clip_graph(seg, clips, root, cmd, dur, cleanup):
     else:
         fc += ";[v1]null[vb]"
     if has_audio(path, track):
-        fc += f";[{i}:a:{track}]{voice_chain(c, cleanup)}{atempo_chain(speed)},apad,atrim=0:{dur:.3f}[ab]"
+        fc += (f";[{i}:a:{track}]{voice_chain(c, cleanup, seg.get('_level_db'))}{atempo_chain(speed)},"
+               f"apad,atrim=end={dur:.3f}[ab]")
     else:
         fc += ";" + silence(cmd, dur)
     return fc
@@ -269,12 +336,12 @@ def block_graph(seg, clips, root, wd, cmd, dur, cleanup):
         i = n_inputs(cmd)
         if "file" in a:
             cmd += ["-i", str(wd / a["file"])]
-            track, fades, voice = 0, "", voice_chain({}, cleanup)
+            track, fades, voice = 0, "", voice_chain(a, cleanup)
         else:
             c = clips[a["clip"]]
             cmd += ["-ss", f"{a['start']:.3f}", "-to", f"{a['end']:.3f}", "-i", str(root / c["file"])]
             adur = a["end"] - a["start"]
-            track, voice = c.get("audio_track", 0), voice_chain(c, cleanup)
+            track, voice = c.get("audio_track", 0), voice_chain(c, cleanup, a.get("_level_db"))
             fades = f"afade=t=in:d={FADE},afade=t=out:st={adur - FADE:.3f}:d={FADE},"
         delay = int(a.get("at", 0) * 1000)
         fc += (f";[{i}:a:{track}]aresample=48000,aformat=channel_layouts=stereo,{voice}{fades}"
@@ -303,7 +370,7 @@ def pip_graph(pip, clips, root, cmd, dur, under="vb") -> str:
     x, y = (s.format(m=PIP_MARGIN) for s in PIP_POS[pip.get("position", "right")])
     border = 6
     return (f";[{i}:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS},"
-            f"tpad=stop_mode=clone:stop_duration={dur:.3f},trim=0:{dur:.3f},"
+            f"tpad=stop_mode=clone:stop_duration={dur:.3f},trim=end={dur:.3f},"
             f"scale=-2:{height - 2 * border},pad=iw+{2 * border}:ih+{2 * border}:{border}:{border}:white,"
             f"format=yuva420p,fade=t=in:d=0.2:alpha=1,fade=t=out:st={dur - 0.2:.3f}:d=0.2:alpha=1[pip];"
             f"[{under}][pip]overlay={x}:{y}:shortest=0:eof_action=pass[vp]")
@@ -345,7 +412,7 @@ def broll_graph(seg, clips, root, wd, cmd, dur, vlabel) -> tuple[str, str]:
                     "-i", str(root / c["file"])]
             fc += (f";[{i}:v]setpts=(PTS-STARTPTS)/{speed},fps={FPS}[bx{k}];"
                    + layout_filter(c.get("layout", "fill"), f"bx{k}", f"by{k}"))
-        fc += (f";[by{k}]trim=0:{d:.3f},setpts=PTS-STARTPTS+{t:.3f}/TB[bz{k}];"
+        fc += (f";[by{k}]trim=end={d:.3f},setpts=PTS-STARTPTS+{t:.3f}/TB[bz{k}];"
                f"[{vlabel}][bz{k}]overlay=0:0:eof_action=pass[vB{k}]")
         vlabel = f"vB{k}"
     return fc, vlabel
@@ -563,8 +630,15 @@ def audio_graph(plan, cfg, inputs, spans) -> str:
     gates = [f"max(0,min(1,max(({a:.3f}-t)/{MUSIC_RAMP},(t-{b:.3f})/{MUSIC_RAMP})))"
              for a, b, ok in spans if not ok and a > start]
     gate = f",volume='{'*'.join(gates)}':eval=frame" if gates else ""
-    fc += (f";[{cur}]atrim=0:{needed:.3f},afade=t=in:d=1.5,afade=t=out:st={needed - 3:.3f}:d=3,"
-           f"adelay={int(start * 1000)}:all=1{gate},apad,atrim=0:{total:.3f}[music];"
+    # The lead-in is real silent samples concatenated in front, not adelay:
+    # on video2, crossfaded mp3s -> adelay(92.7s) -> apad -> atrim dropped the
+    # delay entirely (music started at 0 and ran out ~200s), though each
+    # filter behaves alone. Concat with anullsrc is sample-exact.
+    i = n_inputs(inputs)
+    inputs += ["-f", "lavfi", "-t", f"{start:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+    fc += (f";[{cur}]atrim=end={needed:.3f},asetpts=PTS-STARTPTS,"
+           f"afade=t=in:d=1.5,afade=t=out:st={needed - 3:.3f}:d=3[bed];"
+           f"[{i}:a][bed]concat=n=2:v=0:a=1{gate},apad,atrim=end={total:.3f},asetpts=PTS-STARTPTS[music];"
            f"[music][key]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=400[ducked];"
            f"[voice][ducked]amix=inputs=2:duration=first:normalize=0[mix]")
     print(f"music: {' -> '.join(f for f, _ in playlist)} from {start:.1f}s"
@@ -631,6 +705,8 @@ def main():
                  f"is only for YouTube videos, never Amazon. Set \"destination\": \"youtube\" or drop \"music\".")
     clips = plan["clips"]
     cleanup = plan.get("voice_cleanup", False)
+    if plan.get("voice_level_lufs") is not None:
+        set_voice_levels(plan, clips, root, wd, plan["voice_level_lufs"])
     sfx_dir = assets_dir("sfx")
     rdir = wd / ("render_preview" if args.preview else "render")
     rdir.mkdir(exist_ok=True)
